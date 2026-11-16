@@ -353,7 +353,7 @@ export async function backupEsp32Firmware({port,version="6.1.1",outputPath,devic
  let security;
  try{security=await esptool(installed.idfPath,["--port",port,"get-security-info"],45000);}
  catch{try{security=await esptool(installed.idfPath,["--port",port,"get_security_info"],45000);}catch{throw new Error("ESP32 security state could not be verified; firmware readback backup is disabled");}}
- if(!/Secure Boot:\\s*Disabled/i.test(security.output)||!/Flash Encryption:\\s*Disabled/i.test(security.output))
+ if(!/Secure Boot:\s*Disabled/i.test(security.output)||!/Flash Encryption:\s*Disabled/i.test(security.output))
   throw new Error("ESP32 secure boot or flash encryption is enabled/unknown; raw firmware backup is not safely restorable");
  try{await esptool(installed.idfPath,["--port",port,"read-flash","0x0",String(flashBytes),outputPath],180000);}
  catch(first){try{await esptool(installed.idfPath,["--port",port,"read_flash","0x0",String(flashBytes),outputPath],180000);}catch{throw first;}}
