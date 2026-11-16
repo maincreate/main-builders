@@ -309,17 +309,29 @@ async function executeJob(config,job){
     const apks=[];
     function collect(dir,depth=0){if(depth>6)return;for(const name of readdirSync(dir,{withFileTypes:true})){const p=join(dir,name.name);if(name.isDirectory())collect(p,depth+1);else if(name.isFile()&&name.name.endsWith(".apk"))apks.push(p);}}
     collect(apkRoot);
-    if(!apks.length)throw new Error("Android build completed without an APK artifact");
+    if(apks.length!==1)throw new Error("Android build must produce exactly one APK for this deployment profile; found "+apks.length);
     const aapt2=join(installed.sdkRoot,"build-tools","36.0.0","aapt2");
     const expectedApi=job.parameters?.target_profile==="android-legacy-api22-eink"?"22":"37";
-    for(const file of apks.slice(0,10)){
-     const badging=await processTool(aapt2,["dump","badging",file],checkout,30000);
-     if(!badging.includes("sdkVersion:'"+expectedApi+"'")||!badging.includes("targetSdkVersion:'"+expectedApi+"'"))
-      throw new Error("APK minSdk/targetSdk does not match selected Android API "+expectedApi+": "+file.split(/[\\/]/).pop());
-     if(expectedApi==="22"&&/native-code:/.test(badging)&&!badging.includes("native-code: 'armeabi-v7a'"))
-      throw new Error("Legacy E Ink APK contains native libraries without armeabi-v7a");
-     const data=readFileSync(file);ids.push(await uploadAsset(config,job.id,file.split(/[\\/]/).pop(),"application/vnd.android.package-archive",data));
-    }
+    const file=apks[0],badging=await processTool(aapt2,["dump","badging",file],checkout,30000);
+    const packageName=badging.match(/^package: name='([^']+)'/m)?.[1];
+    if(!packageName||!/^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$/.test(packageName))
+     throw new Error("Unable to identify a valid Android application package name");
+    if(!badging.includes("sdkVersion:'"+expectedApi+"'")||!badging.includes("targetSdkVersion:'"+expectedApi+"'"))
+     throw new Error("APK minSdk/targetSdk does not match selected Android API "+expectedApi);
+    if(expectedApi==="22"&&/native-code:/.test(badging)&&!badging.includes("native-code: 'armeabi-v7a'"))
+     throw new Error("Legacy E Ink APK contains native libraries without armeabi-v7a");
+    const data=readFileSync(file),stage=mkdtempSync(join(configDir,"android-app-bundle-"));
+    const apkName="application.apk";writeFileSync(join(stage,apkName),data,{mode:0o600});
+    const manifest={kind:"maincreate-android-app-bundle",toolkitVersion:version,targetProfile:job.parameters.target_profile,
+     packageName,minSdk:Number(expectedApi),targetSdk:Number(expectedApi),
+     nativeAbis:(badging.match(/^native-code: (.+)$/m)?.[1]||"").replaceAll("'","").trim().split(/\\s+/).filter(Boolean),
+     apkName,apkSha256:createHash("sha256").update(data).digest("hex"),sourceRevision:job.parameters.revision,
+     createdAt:new Date().toISOString()};
+    writeFileSync(join(stage,"manifest.json"),JSON.stringify(manifest,null,2),{mode:0o600});
+    const archive=join(stage,"android-app-bundle.tar.gz");
+    await processTool("tar",["-czf",archive,"-C",stage,apkName,"manifest.json"],stage,5*60*1000);
+    ids.push(await uploadAsset(config,job.id,"android-app-bundle.tar.gz","application/gzip",readFileSync(archive)));
+    rmSync(stage,{recursive:true,force:true});
     ids.push(await uploadAsset(config,job.id,"android-build-log.txt","text/plain",Buffer.from(output||"Build completed")));
    }else if(step.capability==="firmware.esp_idf.backup"){
     const version=job.parameters?.toolkit_version,chip=String(job.parameters?.target_chip||"").toLowerCase().replace(/-/g,"");
