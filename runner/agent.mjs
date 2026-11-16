@@ -112,7 +112,7 @@ async function downloadJobArtifacts(config,job,destination){
  mkdirSync(destination,{recursive:true,mode:0o700});
  const result=[];
  for(const asset of listed.assets){
-  if(!/^(?:maincreate-|base\.apk$|split-\d+\.apk$)/.test(asset.name))continue;
+  if(!/^(?:maincreate-|base\.apk$|split-\d+\.apk$)/.test(asset.name)&&!/\.apk$/i.test(asset.name))continue;
   if(!Number.isSafeInteger(asset.size)||asset.size<1||asset.size>64*1024*1024)throw new Error("Source artifact exceeds allowed size");
   const chunks=[];let offset=0;
   while(offset<asset.size){
@@ -231,9 +231,11 @@ async function executeJob(config,job){
      const meta=assets.find(a=>a.name==="maincreate-android-manifest.json");
      if(!meta)throw new Error("Source Android build is missing its manifest");
      const manifest=JSON.parse(readFileSync(meta.path,"utf8"));
-     const apk=assets.find(a=>a.mime==="application/vnd.android.package-archive");
-     if(!apk)throw new Error("Source Android build has no APK artifact");
-     const entry=manifest.outputs.find(x=>x.name===apk.name);
+     const candidates=assets.filter(a=>a.mime==="application/vnd.android.package-archive");
+     const entry=job.parameters?.package_name?manifest.outputs.find(x=>x.packageName===job.parameters.package_name):manifest.outputs.length===1?manifest.outputs[0]:null;
+     if(!entry)throw new Error("Select an application package when the build produced multiple APKs");
+     const apk=candidates.find(a=>a.name===entry.name);
+     if(!apk)throw new Error("Selected Android APK is missing from the artifact handoff");
      if(!entry)throw new Error("APK is not listed in the Android build manifest");
      if(job.parameters?.package_name&&entry.packageName!==job.parameters.package_name)throw new Error("APK package does not match selected application");
      const result=await deployAndroidApk({adbPath:await localAdbPath(),serial:job.parameters?.device_serial,
