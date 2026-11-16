@@ -5,6 +5,7 @@ import {createHash} from "node:crypto";
 import {spawn} from "node:child_process";
 import {fileURLToPath} from "node:url";
 import {installArduinoCli,installedArduinoCli,isExactArduinoVersion} from "./sdk_install.mjs";
+import {installEspIdf,installAndroidSdk,inspectInstalledToolkit,espIdfRoot,androidRoot} from "./marketplace_toolkits.mjs";
 
 const configDir=process.env.MAIN_RUNNER_STATE_DIR||join(homedir(),".maincreate");
 const path=join(configDir,"runner.json");
@@ -109,9 +110,19 @@ async function executeJob(config,job){
     out.push("Host snapshot recorded");
     ids.push(await uploadAsset(config,job.id,"host-snapshot.json","application/json",
      Buffer.from(JSON.stringify(report,null,2))));
+   }else if(step.capability==="toolkit.esp_idf.install"){
+    if(process.env.MAIN_RUNNER_ENABLE_SDK_INSTALLS!=="1")throw new Error("Toolkit installation disabled by operator opt-in");
+    const version=job.parameters?.version;
+    const installed=await installEspIdf({version,os,architecture});
+    out.push("Installed ESP-IDF "+installed.version+" on "+installed.path+"; EIM "+installed.eimVersion+"; SHA-256 "+installed.sha256);
+   }else if(step.capability==="toolkit.android.install"){
+    if(process.env.MAIN_RUNNER_ENABLE_SDK_INSTALLS!=="1")throw new Error("Toolkit installation disabled by operator opt-in");
+    const accepted=job.parameters?.license_accepted==="true";
+    const installed=await installAndroidSdk({os,architecture,acceptLicenses:accepted});
+    out.push("Installed Android SDK "+installed.version+" on "+installed.path+"; SHA-256 "+installed.sha256);
    }else if(step.capability==="firmware.esp_idf.build"){
-    const repo=job.parameters?.repository;
-    if(typeof repo!=="string")throw new Error("Repository missing");
+    const repo=job.parameters?.repository,version=job.parameters?.toolkit_version;
+    if(typeof repo!=="string"||!["5.5.6","6.1.1"].includes(version))throw new Error("Repository and exact marketplace ESP-IDF version are required");
     const checkout=approvedCheckout(repo);
     if(typeof job.parameters?.revision!=="string"||!/^[a-f0-9]{40}$/i.test(job.parameters.revision))
      throw new Error("An exact Git revision must be approved before building");
@@ -120,14 +131,37 @@ async function executeJob(config,job){
      throw new Error("Checkout revision differs from approved plan; update the checkout separately");
     const dirty=(await processTool("git",["status","--porcelain=v1","--untracked-files=normal"],checkout,20000)).trim();
     if(dirty)throw new Error("Approved checkout has modified or untracked files; use a clean pinned checkout");
-    // No user-provided executable, flags, environment, working directory, URL or command string.
-    const output=await processTool(process.env.MAIN_RUNNER_IDF_CMD||"idf.py",["-C",checkout,"build"],
-     checkout,20*60*1000);
+    const installed=await inspectInstalledToolkit({family:"esp-idf",version});
+    if(!installed.installed)throw new Error("Selected ESP-IDF "+version+" is not installed and verified on this builder");
+    const output=await processTool("bash",["-lc",'source "$1" >/dev/null && test "$(idf.py --version)" = "$2" && idf.py -C "$3" build',"maincreate",installed.exportScript,"ESP-IDF v"+version,checkout],
+     checkout,30*60*1000);
     out.push(output.slice(-14000));
-    ids.push(await uploadAsset(config,job.id,"esp-idf-build-log.txt","text/plain",
-     Buffer.from(output||"Build completed")));
+    ids.push(await uploadAsset(config,job.id,"esp-idf-build-log.txt","text/plain",Buffer.from(output||"Build completed")));
     for(const artifact of gatherFirmware(checkout))
      ids.push(await uploadAsset(config,job.id,artifact.name,"application/octet-stream",artifact.data));
+   }else if(step.capability==="android.app.build"){
+    const repo=job.parameters?.repository,version=job.parameters?.toolkit_version;
+    if(typeof repo!=="string"||version!=="2026.2.2-patch1")throw new Error("Repository and exact Android SDK version are required");
+    const checkout=approvedCheckout(repo);
+    if(typeof job.parameters?.revision!=="string"||!/^[a-f0-9]{40}$/i.test(job.parameters.revision))throw new Error("Exact Git revision required");
+    const actual=(await processTool("git",["rev-parse","HEAD"],checkout,20000)).trim();
+    if(actual.toLowerCase()!==job.parameters.revision.toLowerCase())throw new Error("Checkout revision differs from approved plan");
+    const dirty=(await processTool("git",["status","--porcelain=v1","--untracked-files=normal"],checkout,20000)).trim();
+    if(dirty)throw new Error("Approved checkout must be clean");
+    const installed=await inspectInstalledToolkit({family:"android-sdk",version});
+    if(!installed.installed)throw new Error("Selected Android SDK is not installed and verified");
+    const gradle=join(checkout,process.platform==="win32"?"gradlew.bat":"gradlew");
+    if(!statSync(gradle).isFile())throw new Error("Project Gradle wrapper is missing");
+    const task=job.parameters?.target_profile==="android-legacy-api22-eink"?"assembleDebug":"assembleDebug";
+    const output=await processTool(gradle,["--no-daemon",task],checkout,45*60*1000);
+    out.push(output.slice(-14000));
+    const apkRoot=join(checkout,"app","build","outputs","apk");
+    const apks=[];
+    function collect(dir,depth=0){if(depth>6)return;for(const name of readdirSync(dir,{withFileTypes:true})){const p=join(dir,name.name);if(name.isDirectory())collect(p,depth+1);else if(name.isFile()&&name.name.endsWith(".apk"))apks.push(p);}}
+    collect(apkRoot);
+    if(!apks.length)throw new Error("Android build completed without an APK artifact");
+    for(const file of apks.slice(0,10)){const data=readFileSync(file);ids.push(await uploadAsset(config,job.id,file.split(/[\\/]/).pop(),"application/vnd.android.package-archive",data));}
+    ids.push(await uploadAsset(config,job.id,"android-build-log.txt","text/plain",Buffer.from(output||"Build completed")));
    }else if(step.capability==="sdk.arduino_cli.install"){
     if(process.env.MAIN_RUNNER_ENABLE_SDK_INSTALLS!=="1")throw new Error("SDK installation adapter disabled by operator opt-in");
     const installed=await installArduinoCli({os,architecture:architecture});
