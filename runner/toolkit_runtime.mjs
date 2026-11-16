@@ -165,7 +165,7 @@ export async function installEspIdf({version,os="linux",architecture=arch(),root
   const activationScript=activations[0]||exports[0]||null;
   if(!activationScript)throw new Error("EIM finished but no ESP-IDF activation script was found");
   const checked=await runIdf(activationScript,["--version"],30000);
-  if(!new RegExp("\\\\bv?"+version.replace(/\./g,"\\\\.")+"\\\\b").test(checked.output))
+  if(!new RegExp("\\bv?"+version.replace(/\./g,"\\.")+"\\b").test(checked.output))
    throw new Error("EIM installed a different ESP-IDF version than requested");
   const record={activationScript,eimPath:eim,eimVersion:EIM_RELEASE.version,installerSha256:recipe.sha256,versionOutput:checked.output};
   saveManifest("esp-idf",version,record,root);
@@ -197,7 +197,7 @@ async function java17(){
   const java=join(home,"bin","java");if(!existsSync(java))continue;
   try{
    const result=await run(java,["-version"],{timeoutMs:10000});
-   const match=result.output.match(/version "(d+)/)||result.output.match(/openjdk (d+)/i);
+   const match=result.output.match(/version "(\d+)/)||result.output.match(/openjdk (\d+)/i);
    if(match&&Number(match[1])===17)return home;
   }catch{}
  }
@@ -315,12 +315,27 @@ export async function buildAndroidApp({projectDir,version=ANDROID_SDK_RELEASE.ve
  writeFileSync(manifestPath,JSON.stringify(manifest,null,2)+"\n",{mode:0o600});
  return {apks:records,manifestPath,manifest,log:"Android APK build and metadata validation completed"};
 }
+function verifyUsbSerial(port,expectedSerial){
+ if(!safePort(port)||typeof expectedSerial!=="string"||!expectedSerial)throw new Error("Stable USB serial identity is required");
+ let tty;
+ try{tty=basename(realpathSync(port));}catch{throw new Error("Selected serial device is no longer present");}
+ let current;
+ try{current=realpathSync(join("/sys/class/tty",tty,"device"));}catch{throw new Error("Cannot resolve selected USB serial device in sysfs");}
+ for(let i=0;i<10&&current.startsWith("/sys/");i++){
+  try{
+   const actual=readFileSync(join(current,"serial"),"utf8").trim();
+   if(actual)return actual===expectedSerial;
+  }catch{}
+  const parent=dirname(current);if(parent===current)break;current=parent;
+ }
+ throw new Error("Selected USB port does not expose a stable hardware serial number");
+}
 async function esptool(activationScript,args,timeoutMs=180000){
  const script='source "$1" >/dev/null 2>&1 && shift && python -m esptool "$@"';
  return run("bash",["-lc",script,"maincreate",activationScript,...args],{timeoutMs,maxOutput:30000});
 }
-export async function probeEsp32({port,version="6.1.1",root=toolkitRoot()}={}){
- if(!safePort(port))throw new Error("Unsafe or unsupported ESP32 serial port");
+export async function probeEsp32({port,version="6.1.1",root=toolkitRoot(),deviceSerial}={}){
+ verifyUsbSerial(port,deviceSerial);
  const installed=await verifyEspIdf(version,{root});
  try{
   const result=await esptool(installed.activationScript,["--port",port,"chip-id"],45000);
@@ -334,10 +349,10 @@ export async function probeEsp32({port,version="6.1.1",root=toolkitRoot()}={}){
   return {chip:chip.toUpperCase(),output:result.output};
  }
 }
-export async function flashEsp32({port,version="6.1.1",imagePath,manifest,root=toolkitRoot()}={}){
+export async function flashEsp32({port,version="6.1.1",imagePath,manifest,deviceSerial,root=toolkitRoot()}={}){
  if(!existsSync(imagePath)||!manifest||manifest.artifactType!=="esp32-firmware-image")throw new Error("Verified ESP32 firmware artifact is required");
  const actualHash=hash(readFileSync(imagePath));if(actualHash!==manifest.sha256)throw new Error("ESP32 firmware artifact checksum mismatch");
- const probe=await probeEsp32({port,version,root});
+ const probe=await probeEsp32({port,version,root,deviceSerial});
  if(normalizeEspChip(probe.chip)!==normalizeEspChip(manifest.target))throw new Error("Connected chip "+probe.chip+" does not match firmware target "+manifest.target);
  const installed=await verifyEspIdf(version,{root});
  try{return await esptool(installed.activationScript,["--port",port,"write-flash","0x0",imagePath],180000);}
@@ -345,7 +360,7 @@ export async function flashEsp32({port,version="6.1.1",imagePath,manifest,root=t
 }
 export async function backupEsp32Firmware({port,version="6.1.1",outputPath,deviceSerial,root=toolkitRoot()}={}){
  if(!safePort(port)||typeof deviceSerial!=="string"||!deviceSerial)throw new Error("Stable device serial and serial port are required");
- const probe=await probeEsp32({port,version,root}),installed=await verifyEspIdf(version,{root});
+ const probe=await probeEsp32({port,version,root,deviceSerial}),installed=await verifyEspIdf(version,{root});
  let info;
  try{info=await esptool(installed.activationScript,["--port",port,"flash-id"],45000);}
  catch{info=await esptool(installed.activationScript,["--port",port,"flash_id"],45000);}
@@ -370,9 +385,14 @@ export async function restoreEsp32Firmware({port,version="6.1.1",imagePath,manif
  if(!manifest||manifest.artifactType!=="esp32-firmware-backup"||manifest.deviceSerial!==deviceSerial)
   throw new Error("Firmware restore is restricted to the original device serial");
  if(hash(readFileSync(imagePath))!==manifest.sha256)throw new Error("Firmware backup checksum mismatch");
- const probe=await probeEsp32({port,version,root});
- if(normChip(probe.chip)!==normChip(manifest.chip))throw new Error("Backup chip identity does not match connected device");
+ const probe=await probeEsp32({port,version,root,deviceSerial});
+ if(normalizeEspChip(probe.chip)!==normalizeEspChip(manifest.chip))throw new Error("Backup chip identity does not match connected device");
  const installed=await verifyEspIdf(version,{root});
+ let security;
+ try{security=await esptool(installed.activationScript,["--port",port,"get-security-info"],45000);}
+ catch{try{security=await esptool(installed.activationScript,["--port",port,"get_security_info"],45000);}catch{throw new Error("ESP32 security state could not be re-verified; restore is disabled");}}
+ if(!/Secure Boot:\s*Disabled/i.test(security.output)||!/Flash Encryption:\s*Disabled/i.test(security.output))
+  throw new Error("ESP32 security features are enabled/unknown; refusing raw firmware restore");
  let info;
  try{info=await esptool(installed.activationScript,["--port",port,"flash-id"],45000);}
  catch{info=await esptool(installed.activationScript,["--port",port,"flash_id"],45000);}
