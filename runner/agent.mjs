@@ -537,6 +537,24 @@ async function detectPackages(){
  }catch{}
  return packages;
 }
+async function scanAndroidDevices(){
+ try{
+  const adb=(await processTool("bash",["-lc","command -v adb"],process.cwd(),10000)).trim();
+  if(!adb.startsWith("/"))return [];
+  const listing=await processTool(adb,["devices","-l"],process.cwd(),10000),devices=[];
+  for(const line of listing.split(/\\r?\\n/).slice(1)){
+   const match=line.match(/^([A-Za-z0-9._:-]{3,128})\\s+device(?:\\s|$)/);if(!match)continue;
+   const serial=match[1],prop=async key=>(await processTool(adb,["-s",serial,"shell","getprop",key],process.cwd(),10000)).trim();
+   const [api,abi,release,model,product]=await Promise.all([
+    prop("ro.build.version.sdk"),prop("ro.product.cpu.abi"),prop("ro.build.version.release"),
+    prop("ro.product.model"),prop("ro.product.name")
+   ]);
+   devices.push({serial,apiLevel:Number(api)||null,abi:abi.slice(0,40),release:release.slice(0,40),
+    model:model.slice(0,120),product:product.slice(0,120),connected:true});
+  }
+  return devices.slice(0,16);
+ }catch{return [];}
+}
 async function run(){
  const config=JSON.parse(readFileSync(path,"utf8"));
  if(config.url!==endpoint)throw new Error("Controller URL does not match enrollment");
