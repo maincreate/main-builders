@@ -41,4 +41,6 @@ jobs:
           (cd host && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o /tmp/maincreate-host-linux-arm64 .)
           test "$(cat targets/linux/amd64/VERSION)" = "$(/tmp/maincreate-host-linux-amd64 version)"
           test "$(cat targets/linux/arm64/VERSION)" = "$(cat targets/linux/amd64/VERSION)"
-          file /tmp/maincreate-host-linux-amd64 /tmp/maincreate-host-linux-arm64
+          test -s /tmp/maincreate-host-linux-amd64
+          test -s /tmp/maincreate-host-linux-arm64
+          sha256sum /tmp/maincreate-host-linux-amd64 /tmp/maincreate-host-linux-arm64
