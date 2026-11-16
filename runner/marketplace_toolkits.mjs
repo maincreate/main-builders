@@ -160,7 +160,9 @@ export async function installAndroidSdk({os=osName(),architecture=archName(),roo
  const major=Number(javaVersion.match(/version ["']?(\\d+)/i)?.[1]||javaVersion.match(/openjdk (\\d+)/i)?.[1]||0);
  if(major<17)throw new Error("A system JDK 17 or newer is required before Android SDK installation");
  const archive=await downloadFn(recipe.url);const digest=verifyDigest(archive,recipe.sha256);
- const parent=androidRoot(root);\n if(existsSync(parent)){const existing=await inspectInstalledToolkit({family:"android-sdk",version:ANDROID_RELEASE.version,root});if(existing.installed)return {...existing,status:"already-installed"};}\n await fs.mkdir(dirname(parent),{recursive:true,mode:0o700});
+ const parent=androidRoot(root);
+ if(existsSync(parent)){const existing=await inspectInstalledToolkit({family:"android-sdk",version:ANDROID_RELEASE.version,root});if(existing.installed)return {...existing,status:"already-installed"};}
+ await fs.mkdir(dirname(parent),{recursive:true,mode:0o700});
  const stage=await fs.mkdtemp(join(dirname(parent),".stage-android-"));
  try{
   const extracted=join(stage,"extracted");await extractZip(archive,extracted,{maxEntries:20000,maxExpanded:2*1024*1024*1024});
