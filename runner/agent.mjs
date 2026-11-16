@@ -136,21 +136,16 @@ function gatherFirmware(dir){
  }catch(e){if(e.code!=="ENOENT")throw e;}
  return items;
 }
-function firmwareFiles(root){
+function firmwareFiles(root,names){
  const files=[];
- function walk(dir,relative=""){
-  for(const ent of readdirSync(dir,{withFileTypes:true})){
-   if(ent.isSymbolicLink())throw new Error("Firmware build contains a symbolic link");
-   const absolute=join(dir,ent.name),name=relative?relative+"/"+ent.name:ent.name;
-   if(ent.isDirectory())walk(absolute,name);
-   else if(ent.isFile()){
-    const st=lstatSync(absolute);if(st.size>32*1024*1024)throw new Error("Firmware file exceeds bundle limits");
-    files.push({name,sha256:createHash("sha256").update(readFileSync(absolute)).digest("hex"),size:st.size});
-   }
-  }
+ for(const name of [...new Set(["flasher_args.json",...names])].sort()){
+  if(typeof name!=="string"||name.startsWith("/")||name.split("/").includes("..")||name.includes("\\\\"))throw new Error("Unsafe firmware file path");
+  const absolute=join(root,name),actual=realpathSync(absolute);
+  if(!actual.startsWith(realpathSync(root)+sep)||!lstatSync(actual).isFile())throw new Error("Firmware bundle file is not a regular file");
+  const data=readFileSync(actual);if(data.length>32*1024*1024)throw new Error("Firmware file exceeds bundle limits");
+  files.push({name,sha256:createHash("sha256").update(data).digest("hex"),size:data.length});
  }
- walk(root);if(!files.some(x=>x.name==="flasher_args.json"))throw new Error("ESP-IDF build did not produce flasher_args.json");
- return files.sort((a,b)=>a.name.localeCompare(b.name));
+ return files;
 }
 function verifyFirmwareFiles(root,files){
  if(!Array.isArray(files)||!files.length||files.length>5000)throw new Error("Invalid firmware file manifest");
@@ -165,9 +160,12 @@ function verifyFirmwareFiles(root,files){
  }
 }
 async function createFirmwareBundle(config,job,checkout,version,chip,revision){
- const build=join(checkout,"build"),files=firmwareFiles(build);
- const stage=mkdtempSync(join(configDir,"firmware-bundle-")),payload=join(stage,"payload");
- mkdirSync(payload,{recursive:true,mode:0o700});cpSync(build,join(payload,"build"),{recursive:true,dereference:false});
+ const build=join(checkout,"build"),flasher=JSON.parse(readFileSync(join(build,"flasher_args.json"),"utf8"));
+ const parsed=validateFlasherArgs(flasher,build),names=parsed.files.map(x=>x.file.slice(realpathSync(build).length+1));
+ const files=firmwareFiles(build,names);
+ const stage=mkdtempSync(join(configDir,"firmware-bundle-")),payload=join(stage,"payload"),buildPayload=join(payload,"build");
+ mkdirSync(buildPayload,{recursive:true,mode:0o700});
+ for(const item of files){const target=join(buildPayload,item.name);mkdirSync(dirname(target),{recursive:true,mode:0o700});cpSync(join(build,item.name),target);}
  const manifest={kind:"maincreate-esp-idf-firmware-bundle",toolkitVersion:version,targetChip:chip,
   sourceRevision:revision,createdAt:new Date().toISOString(),files,bundleSha256:createHash("sha256").update(JSON.stringify(files)).digest("hex")};
  writeFileSync(join(payload,"maincreate-manifest.json"),JSON.stringify(manifest,null,2),{mode:0o600});
@@ -187,7 +185,7 @@ async function extractFirmwareBundle(file,version,chip){
  const verbose=await processTool("tar",["-tvzf",file],stage,60000);
  if(verbose.split(/\\r?\\n/).some(line=>/^[lh]/.test(line)))throw new Error("Firmware archive contains links");
  await processTool("tar",["-xzf",file,"-C",stage,"--no-same-owner","--no-same-permissions"],stage,5*60*1000);
- const root=join(stage,"payload"),manifest=JSON.parse(readFileSync(join(root,"maincreate-manifest.json"),"utf8"));
+ const root=stage,manifest=JSON.parse(readFileSync(join(root,"maincreate-manifest.json"),"utf8"));
  validateFirmwareManifest(manifest,{version,chip});
  verifyFirmwareFiles(join(root,"build"),manifest.files);
  const flasher=JSON.parse(readFileSync(join(root,"build","flasher_args.json"),"utf8"));
@@ -255,7 +253,7 @@ async function executeJob(config,job){
     if(!detected.includes(chip))throw new Error("Connected chip does not match selected firmware target: "+probe.slice(-1500));
     const args=["--port",port,"--chip",chip,"write-flash",...bundle.parsed.writeFlashArgs];
     for(const item of bundle.parsed.files)args.push("0x"+item.address.toString(16),item.file);
-    const flashOutput=await processTool("bash",["-lc",'source "$1" >/dev/null && shift 2 && esptool "$@"',"maincreate",installed.exportScript,...args],process.cwd(),15*60*1000);
+    const flashOutput=await processTool("bash",["-lc",'source "$1" >/dev/null && shift && esptool "$@"',"maincreate",installed.exportScript,...args],process.cwd(),15*60*1000);
     out.push("Firmware flashed to verified "+chip+" on "+port+": "+flashOutput.slice(-5000));
     rmSync(bundle.stage,{recursive:true,force:true});
    }else if(step.capability==="android.app.build"){
