@@ -13,7 +13,7 @@ jobs:
   validate:
     # Never run untrusted fork code on the private Main{Create} CI host.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, ci, linux-x64]
+    runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -26,7 +26,7 @@ jobs:
       - name: Host and runner tests
         run: |
           (cd host && go test ./...)
-          node --test runner/service.test.mjs runner/sdk_install.test.mjs
+          node --test runner/service.test.mjs runner/sdk_install.test.mjs runner/marketplace_toolkits.test.mjs
           bash -n scripts/install-linux.sh scripts/uninstall-linux.sh
       - name: Wrong-architecture selection fails before package changes
         run: |
