@@ -154,7 +154,7 @@ export async function inspectInstalledToolkit({family,version,root=sdkRoot()}={}
   let exportScript=null;async function findExport(dir,depth=0){if(depth>5)return;for(const ent of await fs.readdir(dir,{withFileTypes:true})){const child=join(dir,ent.name);if(ent.isDirectory())await findExport(child,depth+1);else if(ent.isFile()&&ent.name==="export.sh")exportScript=child;}}
   await findExport(p);if(!exportScript)return {installed:false};
   const output=await run("bash",["-lc",'source "$1" >/dev/null && idf.py --version',"maincreate",exportScript],{timeout:60000});
-  return {installed:output.includes(version),version,executable:"idf.py",path:p};
+  return {installed:output.includes(version),version,executable:"idf.py",path:p,exportScript};
  }
  if(family==="android-sdk"){
   const p=join(androidRoot(root),"sdk");
