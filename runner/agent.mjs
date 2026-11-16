@@ -201,7 +201,7 @@ async function executeJob(config,job){
      if(!image||!manifestAsset)throw new Error("Source build is missing the merged firmware image or manifest");
      const manifest=JSON.parse(readFileSync(manifestAsset.path,"utf8"));
      const result=await flashEsp32({port:job.parameters?.device_port,version:job.parameters?.toolkit_version,
-      imagePath:image.path,manifest});
+      imagePath:image.path,manifest,deviceSerial:job.parameters?.device_serial});
      out.push(result.output);
     }finally{rmSync(temp,{recursive:true,force:true});}
    }else if(step.capability==="firmware.esp_idf.backup"){
