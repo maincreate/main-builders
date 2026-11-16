@@ -1,6 +1,6 @@
 import {test} from "node:test";
 import assert from "node:assert/strict";
-import {ESP_IDF_RELEASES,ANDROID_RELEASE,espIdfRoot,androidRoot,installEspIdf,installAndroidSdk,cleanupToolkit} from "./marketplace_toolkits.mjs";
+import {ESP_IDF_RELEASES,ANDROID_RELEASE,espIdfRoot,androidRoot,installEspIdf,installAndroidSdk,cleanupToolkit,validateFirmwareManifest,validateFlasherArgs} from "./marketplace_toolkits.mjs";
 
 test("ESP-IDF exposes only pinned stable versions and Linux builder architectures",()=>{
  assert.deepEqual(Object.keys(ESP_IDF_RELEASES).sort(),["5.5.6","6.1.1"]);
@@ -33,4 +33,18 @@ test("cleanup is dry-run by default and refuses active job references",async()=>
  const result=await cleanupToolkit({family:"esp-idf",version:"6.1.1",root:"/tmp/maincreate-sdk-test"});
  assert.equal(result.dryRun,true);assert.equal(result.deleted,false);
  await assert.rejects(()=>cleanupToolkit({family:"esp-idf",version:"6.1.1",root:"/tmp/maincreate-sdk-test",activeJobs:["job-1"]}),/active jobs/);
+});
+
+test("ESP-IDF firmware manifests pin target, toolkit, revision and digest",()=>{
+ const valid={kind:"maincreate-esp-idf-firmware-bundle",toolkitVersion:"6.1.1",targetChip:"esp32s3",sourceRevision:"a".repeat(40),bundleSha256:"b".repeat(64)};
+ assert.equal(validateFirmwareManifest(valid,{version:"6.1.1",chip:"ESP32S3"}),valid);
+ assert.throws(()=>validateFirmwareManifest(valid,{version:"5.5.6",chip:"ESP32S3"}),/does not match/);
+ assert.throws(()=>validateFirmwareManifest({...valid,targetChip:"esp32"}, {version:"6.1.1",chip:"esp32s3"}),/does not match/);
+});
+test("ESP-IDF flash map accepts bounded offsets and safe files only",()=>{
+ const map={flash_files:{"0x1000":"bootloader.bin","0x8000":"partition-table.bin"},write_flash_args:["--flash-mode","dio","--flash-size","4MB"]};
+ const parsed=validateFlasherArgs(map,"/tmp/build");
+ assert.equal(parsed.files.length,2);
+ assert.throws(()=>validateFlasherArgs({...map,flash_files:{"0x0":"../escape.bin"}},"/tmp/build"),/Unsafe/);
+ assert.throws(()=>validateFlasherArgs({...map,write_flash_args:["--port","/dev/ttyUSB0"]},"/tmp/build"),/Unsupported/);
 });
