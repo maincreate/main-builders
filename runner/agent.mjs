@@ -368,9 +368,9 @@ async function detectAndroidDevices(){
  if(!adb)try{adb=(await verifyAndroidAdb()).adbPath;}catch{}
  if(!adb)return [];
  const listing=await processTool(adb,["devices","-l"],undefined,12000).catch(()=> "");
- const rows=String(listing).split(/\\r?\\n/).slice(1),devices=[];
+ const rows=String(listing).split(/\r?\n/).slice(1),devices=[];
  for(const line of rows){
-  const match=line.trim().match(/^([^\\s]+)\\s+device\\b(.*)$/);
+  const match=line.trim().match(/^([^\s]+)\s+device\b(.*)$/);
   if(!match||match[1].startsWith("emulator-"))continue;
   const serial=match[1];
   const prop=async key=>String(await processTool(adb,["-s",serial,"shell","getprop",key],undefined,8000).catch(()=> "")).trim();
