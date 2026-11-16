@@ -2,7 +2,7 @@ name: Linux ARM64 and x64 host parity
 
 on:
   push:
-    branches: [main, 'feature/**']
+    branches: [main, 'feature/**', 'feat/**']
   pull_request:
     branches: [main]
 
@@ -27,7 +27,10 @@ jobs:
         run: |
           (cd host && go test ./...)
           node --test runner/service.test.mjs runner/sdk_install.test.mjs
-          bash -n scripts/install-linux.sh scripts/uninstall-linux.sh
+          bash -n scripts/install-linux.sh scripts/uninstall-linux.sh scripts/maincreate-toolkit.sh
+          bash scripts/maincreate-toolkit.sh --help
+          if bash scripts/maincreate-toolkit.sh install unknown 1.0.0 >/tmp/toolkit-invalid.log 2>&1; then exit 1; fi
+          grep -q 'Unknown toolkit family' /tmp/toolkit-invalid.log
       - name: Wrong-architecture selection fails before package changes
         run: |
           if MAIN_CONTROLLER_URL=https://example.com MAIN_EXPECTED_ARCH=arm64 bash scripts/install-linux.sh >/tmp/wrong-arch.log 2>&1; then
