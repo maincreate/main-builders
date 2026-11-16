@@ -1,11 +1,11 @@
-import {readFileSync,writeFileSync,mkdirSync,chmodSync,statSync,realpathSync,readdirSync} from "node:fs";
+import {readFileSync,writeFileSync,mkdirSync,chmodSync,statSync,realpathSync,readdirSync,cpSync,mkdtempSync,rmSync,lstatSync} from "node:fs";
 import {join,resolve,isAbsolute,sep,dirname} from "node:path";
 import {homedir,hostname,platform,arch,cpus,totalmem,freemem,uptime} from "node:os";
 import {createHash} from "node:crypto";
 import {spawn} from "node:child_process";
 import {fileURLToPath} from "node:url";
 import {installArduinoCli,installedArduinoCli,isExactArduinoVersion} from "./sdk_install.mjs";
-import {installEspIdf,installAndroidSdk,inspectInstalledToolkit,espIdfRoot,androidRoot} from "./marketplace_toolkits.mjs";
+import {installEspIdf,installAndroidSdk,inspectInstalledToolkit,espIdfRoot,androidRoot,validateFirmwareManifest,validateFlasherArgs} from "./marketplace_toolkits.mjs";
 
 const configDir=process.env.MAIN_RUNNER_STATE_DIR||join(homedir(),".maincreate");
 const path=join(configDir,"runner.json");
@@ -136,6 +136,64 @@ function gatherFirmware(dir){
  }catch(e){if(e.code!=="ENOENT")throw e;}
  return items;
 }
+function firmwareFiles(root){
+ const files=[];
+ function walk(dir,relative=""){
+  for(const ent of readdirSync(dir,{withFileTypes:true})){
+   if(ent.isSymbolicLink())throw new Error("Firmware build contains a symbolic link");
+   const absolute=join(dir,ent.name),name=relative?relative+"/"+ent.name:ent.name;
+   if(ent.isDirectory())walk(absolute,name);
+   else if(ent.isFile()){
+    const st=lstatSync(absolute);if(st.size>32*1024*1024)throw new Error("Firmware file exceeds bundle limits");
+    files.push({name,sha256:createHash("sha256").update(readFileSync(absolute)).digest("hex"),size:st.size});
+   }
+  }
+ }
+ walk(root);if(!files.some(x=>x.name==="flasher_args.json"))throw new Error("ESP-IDF build did not produce flasher_args.json");
+ return files.sort((a,b)=>a.name.localeCompare(b.name));
+}
+function verifyFirmwareFiles(root,files){
+ if(!Array.isArray(files)||!files.length||files.length>5000)throw new Error("Invalid firmware file manifest");
+ for(const item of files){
+  if(typeof item.name!=="string"||item.name.startsWith("/")||item.name.split("/").includes("..")||item.name.includes("\\\\"))
+   throw new Error("Unsafe firmware file manifest entry");
+  const file=join(root,item.name),actual=realpathSync(file);
+  if(!actual.startsWith(realpathSync(root)+sep)||!statSync(actual).isFile())throw new Error("Firmware bundle file escaped its root");
+  const data=readFileSync(actual);
+  if(data.length!==item.size||createHash("sha256").update(data).digest("hex")!==item.sha256)
+   throw new Error("Firmware bundle file integrity check failed: "+item.name);
+ }
+}
+async function createFirmwareBundle(config,job,checkout,version,chip,revision){
+ const build=join(checkout,"build"),files=firmwareFiles(build);
+ const stage=mkdtempSync(join(configDir,"firmware-bundle-")),payload=join(stage,"payload");
+ mkdirSync(payload,{recursive:true,mode:0o700});cpSync(build,join(payload,"build"),{recursive:true,dereference:false});
+ const manifest={kind:"maincreate-esp-idf-firmware-bundle",toolkitVersion:version,targetChip:chip,
+  sourceRevision:revision,createdAt:new Date().toISOString(),files,bundleSha256:createHash("sha256").update(JSON.stringify(files)).digest("hex")};
+ writeFileSync(join(payload,"maincreate-manifest.json"),JSON.stringify(manifest,null,2),{mode:0o600});
+ const archive=join(stage,"firmware-bundle.tar.gz");
+ await processTool("tar",["-czf",archive,"-C",payload,"."],payload,5*60*1000);
+ const data=readFileSync(archive);if(data.length>128*1024*1024)throw new Error("Firmware bundle exceeds transfer limit");
+ const id=await uploadAsset(config,job.id,"firmware-bundle.tar.gz","application/gzip",data);
+ rmSync(stage,{recursive:true,force:true});
+ return {assetId:id,manifest};
+}
+async function extractFirmwareBundle(file,version,chip){
+ const stage=mkdtempSync(join(configDir,"firmware-flash-"));
+ const listing=await processTool("tar",["-tzf",file],stage,60000);
+ const names=listing.split(/\\r?\\n/).filter(Boolean);
+ if(!names.length||names.length>5000||names.some(n=>n.startsWith("/")||n.split("/").includes("..")||n.includes("\\\\")))
+  throw new Error("Firmware archive contains unsafe paths");
+ const verbose=await processTool("tar",["-tvzf",file],stage,60000);
+ if(verbose.split(/\\r?\\n/).some(line=>/^[lh]/.test(line)))throw new Error("Firmware archive contains links");
+ await processTool("tar",["-xzf",file,"-C",stage,"--no-same-owner","--no-same-permissions"],stage,5*60*1000);
+ const root=join(stage,"payload"),manifest=JSON.parse(readFileSync(join(root,"maincreate-manifest.json"),"utf8"));
+ validateFirmwareManifest(manifest,{version,chip});
+ verifyFirmwareFiles(join(root,"build"),manifest.files);
+ const flasher=JSON.parse(readFileSync(join(root,"build","flasher_args.json"),"utf8"));
+ const parsed=validateFlasherArgs(flasher,join(root,"build"));
+ return {stage,root,build:join(root,"build"),manifest,parsed};
+}
 async function executeJob(config,job){
  const results=[],out=[],ids=[],steps=job.steps||[];
  let failed=false;
@@ -176,8 +234,30 @@ async function executeJob(config,job){
      checkout,30*60*1000);
     out.push(output.slice(-14000));
     ids.push(await uploadAsset(config,job.id,"esp-idf-build-log.txt","text/plain",Buffer.from(output||"Build completed")));
-    for(const artifact of gatherFirmware(checkout))
-     ids.push(await uploadAsset(config,job.id,artifact.name,"application/octet-stream",artifact.data));
+    const chip=String(job.parameters?.target_chip||"").toLowerCase().replace(/-/g,"");
+    const configText=readFileSync(join(checkout,"sdkconfig"),"utf8");
+    const configuredChip=configText.match(/^CONFIG_IDF_TARGET="([^"]+)"$/m)?.[1]?.toLowerCase().replace(/-/g,"");
+    if(!chip||configuredChip!==chip)throw new Error("Project sdkconfig target does not match the approved ESP32 chip");
+    const bundle=await createFirmwareBundle(config,job,checkout,version,chip,job.parameters.revision);
+    out.push("Created firmware bundle "+bundle.assetId+" for "+chip+" with "+bundle.manifest.files.length+" verified files");
+   }else if(step.capability==="firmware.esp_idf.flash"){
+    if(!["5.5.6","6.1.1"].includes(job.parameters?.toolkit_version))throw new Error("Exact ESP-IDF toolkit version required");
+    const version=job.parameters.toolkit_version,chip=String(job.parameters?.target_chip||"").toLowerCase().replace(/-/g,"");
+    const port=job.parameters?.port;
+    if(!/^\\/dev\\/(ttyUSB|ttyACM)[0-9]+$/.test(port||""))throw new Error("Select an exact Linux USB serial port");
+    const installed=await inspectInstalledToolkit({family:"esp-idf",version});
+    if(!installed.installed)throw new Error("Selected ESP-IDF version is not installed on deployment runner");
+    const downloaded=await downloadAsset(config,job.id,job.parameters?.source_asset_id);
+    if(downloaded.asset.name!=="firmware-bundle.tar.gz")throw new Error("Expected a Main{Create} firmware bundle");
+    const bundle=await extractFirmwareBundle(downloaded.file,version,chip);
+    const probe=await processTool("bash",["-lc",'source "$1" >/dev/null && esptool --port "$2" chip-id',"maincreate",installed.exportScript,port],process.cwd(),60000);
+    const detected=probe.toLowerCase().replace(/[-_\\s]/g,"");
+    if(!detected.includes(chip))throw new Error("Connected chip does not match selected firmware target: "+probe.slice(-1500));
+    const args=["--port",port,"--chip",chip,"write-flash",...bundle.parsed.writeFlashArgs];
+    for(const item of bundle.parsed.files)args.push("0x"+item.address.toString(16),item.file);
+    const flashOutput=await processTool("bash",["-lc",'source "$1" >/dev/null && shift 2 && esptool "$@"',"maincreate",installed.exportScript,...args],process.cwd(),15*60*1000);
+    out.push("Firmware flashed to verified "+chip+" on "+port+": "+flashOutput.slice(-5000));
+    rmSync(bundle.stage,{recursive:true,force:true});
    }else if(step.capability==="android.app.build"){
     const repo=job.parameters?.repository,version=job.parameters?.toolkit_version;
     if(typeof repo!=="string"||version!=="2026.2.2-patch1")throw new Error("Repository and exact Android SDK version are required");
