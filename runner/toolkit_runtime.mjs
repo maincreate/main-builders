@@ -126,17 +126,17 @@ function readManifest(family,version,root=toolkitRoot()){
  if(value.family!==family||value.version!==version)throw new Error("Toolkit manifest identity mismatch");
  return value;
 }
-async function runIdf(idfPath,args,timeoutMs=30*60*1000){
- if(!idfPath||!existsSync(join(idfPath,"export.sh")))throw new Error("ESP-IDF activation script is missing");
- const script='source "$1/export.sh" >/dev/null 2>&1 && shift && idf.py "$@"';
- return run("bash",["-lc",script,"maincreate",idfPath,...args],{timeoutMs,maxOutput:60000});
+async function runIdf(activationScript,args,timeoutMs=30*60*1000){
+ if(!activationScript||!existsSync(activationScript))throw new Error("ESP-IDF activation script is missing");
+ const script='source "$1" >/dev/null 2>&1 && shift && idf.py "$@"';
+ return run("bash",["-lc",script,"maincreate",activationScript,...args],{timeoutMs,maxOutput:60000});
 }
 export async function verifyEspIdf(version,{root=toolkitRoot()}={}){
  if(!safeVersion(version))throw new Error("Invalid ESP-IDF version");
  const record=readManifest("esp-idf",version,root);
- if(!inside(join(root,"esp-idf",version),record.idfPath)||!existsSync(join(record.idfPath,"export.sh")))
-  throw new Error("ESP-IDF installation path is missing or outside its version root");
- const result=await runIdf(record.idfPath,["--version"],30000);
+ if(!inside(join(root,"esp-idf",version),record.activationScript)||!existsSync(record.activationScript))
+  throw new Error("ESP-IDF activation script is missing or outside its version root");
+ const result=await runIdf(record.activationScript,["--version"],30000);
  if(!new RegExp("\\bv?"+version.replace(/\./g,"\\.")+"\\b").test(result.output))
   throw new Error("Installed ESP-IDF does not match selected version "+version);
  return {...record,verified:true,versionOutput:result.output.slice(0,500)};
@@ -159,18 +159,15 @@ export async function installEspIdf({version,os="linux",architecture=arch(),root
   const staged=join(stage,"eim-cli");await fs.copyFile(binary,staged);chmodSync(staged,0o700);
   await run(staged,["--version"],{timeoutMs:15000});
   mkdirSync(versionRoot,{recursive:true,mode:0o700});
-  await run(staged,["--do-not-track","true","install","-i","v"+version,"-p",versionRoot,"-n","true"],{timeoutMs:90*60*1000,maxOutput:60000});
+  await run(staged,["-n","true","-i","v"+version,"-p",versionRoot],{timeoutMs:90*60*1000,maxOutput:60000});
+  const activations=findFiles(versionRoot,"activate_idf_v"+version+".sh");
   const exports=findFiles(versionRoot,"export.sh");
-  let idfPath=null,versionOutput=null;
-  for(const scriptPath of exports){
-   const candidate=dirname(scriptPath);
-   try{
-    const checked=await runIdf(candidate,["--version"],30000);
-    if(new RegExp("\\\\bv?"+version.replace(/\./g,"\\\\.")+"\\\\b").test(checked.output)){idfPath=candidate;versionOutput=checked.output;break;}
-   }catch{}
-  }
-  if(!idfPath)throw new Error("EIM finished but no exact ESP-IDF "+version+" installation was found");
-  const record={idfPath,eimPath:eim,eimVersion:EIM_RELEASE.version,installerSha256:recipe.sha256,versionOutput};
+  const activationScript=activations[0]||exports[0]||null;
+  if(!activationScript)throw new Error("EIM finished but no ESP-IDF activation script was found");
+  const checked=await runIdf(activationScript,["--version"],30000);
+  if(!new RegExp("\\\\bv?"+version.replace(/\./g,"\\\\.")+"\\\\b").test(checked.output))
+   throw new Error("EIM installed a different ESP-IDF version than requested");
+  const record={activationScript,eimPath:eim,eimVersion:EIM_RELEASE.version,installerSha256:recipe.sha256,versionOutput:checked.output};
   saveManifest("esp-idf",version,record,root);
   return {status:"installed",family:"esp-idf",version,idfPath,eimVersion:EIM_RELEASE.version,sha256:recipe.sha256};
  }finally{rmSync(stage,{recursive:true,force:true});}
@@ -265,9 +262,9 @@ export async function verifyAndroidAdb({root=toolkitRoot()}={}){
 }
 export async function buildEspIdfProject({projectDir,version,root=toolkitRoot()}={}){
  const installed=await verifyEspIdf(version,{root});
- await runIdf(installed.idfPath,["-C",projectDir,"build"],30*60*1000);
+ await runIdf(installed.activationScript,["-C",projectDir,"build"],30*60*1000);
  const merged=join(projectDir,"build","maincreate-firmware.bin");
- await runIdf(installed.idfPath,["-C",projectDir,"merge-bin","-o",merged,"-f","raw"],15*60*1000);
+ await runIdf(installed.activationScript,["-C",projectDir,"merge-bin","-o",merged,"-f","raw"],15*60*1000);
  if(!existsSync(merged)||statSync(merged).size<1||statSync(merged).size>8*1024*1024)throw new Error("Merged ESP32 firmware image is missing or outside artifact limits");
  const image=readFileSync(merged),config=existsSync(join(projectDir,"sdkconfig"))?readFileSync(join(projectDir,"sdkconfig"),"utf8"):"";
  const target=config.match(/^CONFIG_IDF_TARGET="([^"]+)"/m)?.[1]||"unknown";
@@ -312,20 +309,20 @@ export async function buildAndroidApp({projectDir,version=ANDROID_SDK_RELEASE.ve
  writeFileSync(manifestPath,JSON.stringify(manifest,null,2)+"\n",{mode:0o600});
  return {apks:records,manifestPath,manifest,log:"Android APK build and metadata validation completed"};
 }
-async function esptool(idfPath,args,timeoutMs=180000){
- const script='source "$1/export.sh" >/dev/null 2>&1 && shift && python -m esptool "$@"';
- return run("bash",["-lc",script,"maincreate",idfPath,...args],{timeoutMs,maxOutput:30000});
+async function esptool(activationScript,args,timeoutMs=180000){
+ const script='source "$1" >/dev/null 2>&1 && shift && python -m esptool "$@"';
+ return run("bash",["-lc",script,"maincreate",activationScript,...args],{timeoutMs,maxOutput:30000});
 }
 export async function probeEsp32({port,version="6.1.1",root=toolkitRoot()}={}){
  if(!safePort(port))throw new Error("Unsafe or unsupported ESP32 serial port");
  const installed=await verifyEspIdf(version,{root});
  try{
-  const result=await esptool(installed.idfPath,["--port",port,"chip-id"],45000);
+  const result=await esptool(installed.activationScript,["--port",port,"chip-id"],45000);
   const chip=result.output.match(/(?:Chip is|Chip type:|Detecting chip type\.\.\.\s*)(ESP32(?:-[A-Z0-9]+)?)/i)?.[1];
   if(!chip)throw new Error("esptool did not report a recognized chip identity");
   return {chip:chip.toUpperCase(),output:result.output};
  }catch(first){
-  const result=await esptool(installed.idfPath,["--port",port,"chip_id"],45000);
+  const result=await esptool(installed.activationScript,["--port",port,"chip_id"],45000);
   const chip=result.output.match(/(?:Chip is|Chip type:|Detecting chip type\.\.\.\s*)(ESP32(?:-[A-Z0-9]+)?)/i)?.[1];
   if(!chip)throw first;
   return {chip:chip.toUpperCase(),output:result.output};
