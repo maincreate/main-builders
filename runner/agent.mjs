@@ -224,6 +224,13 @@ async function executeJob(config,job){
     out.push("Host snapshot recorded");
     ids.push(await uploadAsset(config,job.id,"host-snapshot.json","application/json",
      Buffer.from(JSON.stringify(report,null,2))));
+   }else if(step.capability==="toolkit.cleanup"){
+    const family=job.parameters?.family,version=job.parameters?.version,dryRun=job.parameters?.dry_run!=="false";
+    const valid=(family==="esp-idf"&&["5.5.6","6.1.1"].includes(version))||
+      (family==="android-sdk"&&version==="2026.2.2-patch1");
+    if(!valid)throw new Error("Unsupported toolkit cleanup selection");
+    const result=await cleanupToolkit({family,version,dryRun,activeJobs:[]});
+    out.push((dryRun?"Cleanup dry-run":"Toolkit removed")+": "+family+" "+version+"; path "+result.path+"; existed "+result.exists);
    }else if(step.capability==="toolkit.esp_idf.install"){
     if(process.env.MAIN_RUNNER_ENABLE_SDK_INSTALLS!=="1")throw new Error("Toolkit installation disabled by operator opt-in");
     const version=job.parameters?.version;
