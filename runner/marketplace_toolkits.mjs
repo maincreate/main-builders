@@ -35,12 +35,12 @@ export const sdkRoot=(base=join(homedir(),".local","share","maincreate","sdks"))
 export const espIdfRoot=(version,base=sdkRoot())=>join(base,"esp-idf",version);
 export const androidRoot=(base=sdkRoot())=>join(base,"android","2026.2.2-patch1");
 
-async function run(bin,args,{cwd,timeout=30*60*1000,env={}}={}){
+async function run(bin,args,{cwd,timeout=30*60*1000,env={},input=""}={}){
  return new Promise((resolvePromise,reject)=>{
-  const child=spawn(bin,args,{cwd,shell:false,windowsHide:true,stdio:["ignore","pipe","pipe"],env:{...process.env,...env}});
+  const child=spawn(bin,args,{cwd,shell:false,windowsHide:true,stdio:["pipe","pipe","pipe"],env:{...process.env,...env}});
   let output="",timer=setTimeout(()=>child.kill("SIGKILL"),timeout);
   const capture=x=>{output+=String(x);if(output.length>20000)output=output.slice(-20000);};
-  child.stdout.on("data",capture);child.stderr.on("data",capture);
+  child.stdout.on("data",capture);child.stderr.on("data",capture);child.stdin.end(input);
   child.once("error",e=>{clearTimeout(timer);reject(e);});
   child.once("close",code=>{clearTimeout(timer);code===0?resolvePromise(output):reject(new Error((output.trim().slice(-3000)||bin)+" (exit "+code+")"));});
  });
@@ -106,8 +106,9 @@ export async function installEspIdf({version,os=osName(),architecture=archName()
   const idfPath=join(parent,"idf");
   await fs.mkdir(parent,{recursive:true,mode:0o700});
   await runner(eim,["--do-not-track","true","install","-i","v"+version,"-p",idfPath,"-n","true"],{timeout:90*60*1000,env:{ESP_PATH:parent}});
-  const exportScript=join(idfPath,"export.sh");
-  if(!existsSync(exportScript))throw new Error("EIM completed without the expected ESP-IDF export.sh");
+  let exportScript=null;async function findExport(dir,depth=0){if(depth>5)return;for(const ent of await fs.readdir(dir,{withFileTypes:true})){const p=join(dir,ent.name);if(ent.isDirectory())await findExport(p,depth+1);else if(ent.isFile()&&ent.name==="export.sh")exportScript=p;}}
+  await findExport(idfPath);
+  if(!exportScript)throw new Error("EIM completed without the expected ESP-IDF export.sh");
   const verify=await runner("bash",["-lc",'source "$1" >/dev/null && idf.py --version', "maincreate",exportScript],{timeout:60000});
   if(!verify.includes(version))throw new Error("Installed ESP-IDF version mismatch: "+verify.trim());
   await fs.mkdir(join(parent,"metadata"),{recursive:true,mode:0o700});
@@ -133,6 +134,7 @@ export async function installAndroidSdk({os=osName(),architecture=archName(),roo
   await fs.chmod(sdkmanager,0o755);
   const sdkRootPath=join(stage,"sdk");await fs.mkdir(sdkRootPath,{recursive:true,mode:0o700});
   const packages=[...ANDROID_RELEASE.packages];
+  await runner(sdkmanager,["--sdk_root="+sdkRootPath,"--licenses"],{timeout:10*60*1000,env:{ANDROID_HOME:sdkRootPath,ANDROID_SDK_ROOT:sdkRootPath},input:"y\n".repeat(100)});
   await runner(sdkmanager,["--sdk_root="+sdkRootPath,...packages],{timeout:90*60*1000,env:{ANDROID_HOME:sdkRootPath,ANDROID_SDK_ROOT:sdkRootPath}});
   const platformTools=join(sdkRootPath,"platform-tools","adb");
   const buildTools=join(sdkRootPath,"build-tools","36.0.0","aapt2");
@@ -148,8 +150,10 @@ export async function installAndroidSdk({os=osName(),architecture=archName(),roo
 export async function inspectInstalledToolkit({family,version,root=sdkRoot()}={}){
  if(family==="esp-idf"){
   const p=join(espIdfRoot(version,root),"idf");
-  if(!existsSync(join(p,"export.sh")))return {installed:false};
-  const output=await run("bash",["-lc",'source "$1" >/dev/null && idf.py --version',"maincreate",join(p,"export.sh")],{timeout:60000});
+  if(!existsSync(p))return {installed:false};
+  let exportScript=null;async function findExport(dir,depth=0){if(depth>5)return;for(const ent of await fs.readdir(dir,{withFileTypes:true})){const child=join(dir,ent.name);if(ent.isDirectory())await findExport(child,depth+1);else if(ent.isFile()&&ent.name==="export.sh")exportScript=child;}}
+  await findExport(p);if(!exportScript)return {installed:false};
+  const output=await run("bash",["-lc",'source "$1" >/dev/null && idf.py --version',"maincreate",exportScript],{timeout:60000});
   return {installed:output.includes(version),version,executable:"idf.py",path:p};
  }
  if(family==="android-sdk"){
