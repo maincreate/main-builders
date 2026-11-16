@@ -331,7 +331,7 @@ async function scanSerialDevices(){
 async function detectPackages(){
  const candidates=[["node","node",["--version"]],["git","git",["--version"]],
   ["python3","python3",["--version"]],["cmake","cmake",["--version"]],
-  ["gcc","gcc",["--version"]],["esp-idf","idf.py",["--version"]],
+  ["gcc","gcc",["--version"]],["esp-idf","idf.py",["--version"]],["adb","adb",["version"]],["eim","eim",["--version"]],
   ["swift","swift",["--version"]],["xcode","xcodebuild",["-version"]]];
  const packages=[];
  for(const [name,bin,args] of candidates){
@@ -353,10 +353,42 @@ async function detectPackages(){
  }catch{}
  return packages;
 }
+
+async function detectToolkits(){
+ const found=[];
+ for(const version of ["5.5.6","6.1.1"]){
+  try{const item=await verifyEspIdf(version);found.push({id:"esp-idf",version,verified:true,observedVersion:item.versionOutput});}catch{}
+ }
+ try{const item=await verifyAndroidSdk();found.push({id:"android-sdk",version:item.version,verified:true});}catch{}
+ try{const item=await verifyAndroidAdb();found.push({id:"android-adb",version:"system",verified:true,source:item.source||"managed"});}catch{}
+ return found;
+}
+async function detectAndroidDevices(){
+ let adb=null;
+ try{adb=(await verifyAndroidSdk()).adb;}catch{}
+ if(!adb)try{adb=(await verifyAndroidAdb()).adbPath;}catch{}
+ if(!adb)return [];
+ const listing=await processTool(adb,["devices","-l"],undefined,12000).catch(()=> "");
+ const rows=String(listing).split(/\\r?\\n/).slice(1),devices=[];
+ for(const line of rows){
+  const match=line.trim().match(/^([^\\s]+)\\s+device\\b(.*)$/);
+  if(!match||match[1].startsWith("emulator-"))continue;
+  const serial=match[1];
+  const prop=async key=>String(await processTool(adb,["-s",serial,"shell","getprop",key],undefined,8000).catch(()=> "")).trim();
+  const [model,product,api,abi]=await Promise.all([
+   prop("ro.product.model"),prop("ro.build.product"),prop("ro.build.version.sdk"),prop("ro.product.cpu.abi")
+  ]);
+  devices.push({serial,model:model.slice(0,100),product:product.slice(0,100),
+   api:Number(api)||null,abi:abi.slice(0,60),connected:true,authorized:true});
+  if(devices.length>=8)break;
+ }
+ return devices;
+}
+
 async function run(){
  const config=JSON.parse(readFileSync(path,"utf8"));
  if(config.url!==endpoint)throw new Error("Controller URL does not match enrollment");
- console.log("Runner started: "+config.name+"; approved jobs only, no shell/flash actions");
+ console.log("Runner started: "+config.name+"; approved toolkit and device operations only");
  const heartbeat=setInterval(()=>{
   post("/api/agent/heartbeat",{id:config.id},config.token).catch(e=>console.error("Heartbeat:",e.message));
  },30000);
@@ -365,7 +397,7 @@ async function run(){
   for(;;){
    if(Date.now()>=nextPackageScan){
     nextPackageScan=Date.now()+300000;
-    try{await post("/api/agent/heartbeat",{id:config.id,packages:await detectPackages()},config.token);}
+    try{await post("/api/agent/heartbeat",{id:config.id,packages:await detectPackages(),toolkits:await detectToolkits()},config.token);}
     catch(e){console.error("Package inventory:",e.message);}
    }
    if(process.env.MAIN_RUNNER_DEVICE_DISCOVERY!=="0"&&Date.now()>=nextScan){
@@ -373,7 +405,9 @@ async function run(){
     try{
      const devices=await scanSerialDevices();
      const summary=await post("/api/agent/devices",{id:config.id,devices},config.token);
-     console.log("Device inventory: "+summary.seen+" USB serial device(s) on "+config.name);
+     const androidDevices=await detectAndroidDevices();
+     await post("/api/agent/heartbeat",{id:config.id,androidDevices},config.token);
+     console.log("Device inventory: "+summary.seen+" USB serial device(s), "+androidDevices.length+" authorized Android device(s) on "+config.name);
     }catch(e){console.error("Device inventory skipped (previous inventory preserved):",e.message);}
    }
    try{
