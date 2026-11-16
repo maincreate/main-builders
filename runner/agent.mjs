@@ -464,6 +464,14 @@ async function detectPackages(){
   const output=await new Promise((resolve,reject)=>{const child=spawn(cli,["version"],{shell:false,stdio:["ignore","pipe","ignore"]});let data="";const timer=setTimeout(()=>child.kill("SIGKILL"),3000);child.stdout.on("data",c=>data+=String(c));child.once("error",e=>{clearTimeout(timer);reject(e)});child.once("close",code=>{clearTimeout(timer);code===0&&isExactArduinoVersion(data)?resolve(data.trim()):reject(new Error("not exact Arduino CLI version"))})});
   packages.push({name:"arduino-cli",version:"1.5.1",path:cli,verified:true,source:"maincreate-per-user-sdk"});
  }catch{}
+ for(const version of ["5.5.6","6.1.1"]){
+  try{const found=await inspectInstalledToolkit({family:"esp-idf",version});if(found.installed)packages.push({name:"esp-idf",version,verified:true});}catch{}
+ }
+ try{const found=await inspectInstalledToolkit({family:"android-sdk",version:"2026.2.2-patch1"});if(found.installed)packages.push({name:"android-sdk",version:"2026.2.2-patch1",verified:true});}catch{}
+ try{
+  const output=await processTool("adb",["version"],process.cwd(),10000);
+  packages.push({name:"adb",version:(output.split(/\\r?\\n/)[0]||"installed").slice(0,90)});
+ }catch{}
  return packages;
 }
 async function run(){
