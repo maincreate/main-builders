@@ -113,7 +113,7 @@ async function authorizedAndroidDevice(adb,serial,expectedApi=22){
  if(typeof serial!=="string"||serial.length<3||serial.length>128||/[\\s\\x00-\\x1f]/.test(serial))
   throw new Error("An exact ADB device serial is required");
  const listing=await processTool(adb,["devices","-l"],process.cwd(),15000);
- const row=listing.split(/\\r?\\n/).find(line=>line.startsWith(serial+"\\t")||line.startsWith(serial+" "));
+ const row=listing.split(/\r?\n/).find(line=>line.startsWith(serial+"\t")||line.startsWith(serial+" "));
  if(!row||!/\\sdevice(?:\\s|$)/.test(row))throw new Error("The selected Android device is not connected and ADB-authorized");
  const readProp=async key=>(await processTool(adb,["-s",serial,"shell","getprop",key],process.cwd(),15000)).trim();
  const api=await readProp("ro.build.version.sdk");
@@ -179,11 +179,11 @@ async function createFirmwareBundle(config,job,checkout,version,chip,revision){
 async function extractFirmwareBundle(file,version,chip){
  const stage=mkdtempSync(join(configDir,"firmware-flash-"));
  const listing=await processTool("tar",["-tzf",file],stage,60000);
- const names=listing.split(/\\r?\\n/).filter(Boolean);
+ const names=listing.split(/\r?\n/).filter(Boolean);
  if(!names.length||names.length>5000||names.some(n=>n.startsWith("/")||n.split("/").includes("..")||n.includes("\\\\")))
   throw new Error("Firmware archive contains unsafe paths");
  const verbose=await processTool("tar",["-tvzf",file],stage,60000);
- if(verbose.split(/\\r?\\n/).some(line=>/^[lh]/.test(line)))throw new Error("Firmware archive contains links");
+ if(verbose.split(/\r?\n/).some(line=>/^[lh]/.test(line)))throw new Error("Firmware archive contains links");
  await processTool("tar",["-xzf",file,"-C",stage,"--no-same-owner","--no-same-permissions"],stage,5*60*1000);
  const root=stage,manifest=JSON.parse(readFileSync(join(root,"maincreate-manifest.json"),"utf8"));
  validateFirmwareManifest(manifest,{version,chip});
@@ -340,7 +340,7 @@ async function executeJob(config,job){
     if(!installed.installed)throw new Error("Selected ESP-IDF version is not installed");
     const device=await probeEspDevice(installed.exportScript,port,chip);
     const security=await espTool(installed.exportScript,port,["get-security-info"],60000);
-    if(/flash.?encryption[^\\n]*(?:enabled|true)|secure.?boot[^\\n]*(?:enabled|true)/i.test(security))
+    if(/flash.?encryption[^\n]*(?:enabled|true)|secure.?boot[^\n]*(?:enabled|true)/i.test(security))
      throw new Error("Refusing raw flash backup while flash encryption or secure boot is enabled");
     const offset=Number.parseInt(job.parameters?.partition_table_offset||"0x8000");
     if(!Number.isSafeInteger(offset)||offset<0||offset>device.flashBytes-4096)throw new Error("Invalid partition table offset");
@@ -367,7 +367,7 @@ async function executeJob(config,job){
     if(downloaded.asset.name!=="esp32-flash-backup.tar.gz")throw new Error("Expected an ESP32 flash backup archive");
     const dir=mkdtempSync(join(configDir,"esp-restore-"));
     const listing=await processTool("tar",["-tzf",downloaded.file],dir,60000);
-    const names=listing.split(/\\r?\\n/).filter(Boolean);
+    const names=listing.split(/\r?\n/).filter(Boolean);
     if(names.length!==2||names.some(n=>!["flash.bin","manifest.json"].includes(n)))throw new Error("Unexpected ESP32 backup archive contents");
     await processTool("tar",["-xzf",downloaded.file,"-C",dir,"--no-same-owner","--no-same-permissions"],dir,60000);
     const manifest=JSON.parse(readFileSync(join(dir,"manifest.json"),"utf8")),data=readFileSync(join(dir,"flash.bin"));
@@ -396,10 +396,10 @@ async function executeJob(config,job){
     if(downloaded.asset.name==="android-app-bundle.tar.gz"){
      bundleDir=mkdtempSync(join(configDir,"android-app-deploy-"));
      const listing=await processTool("tar",["-tzf",downloaded.file],bundleDir,30000);
-     const names=listing.split(/\\r?\\n/).filter(Boolean);
+     const names=listing.split(/\r?\n/).filter(Boolean);
      if(names.length!==2||names.some(n=>!["application.apk","manifest.json"].includes(n)))throw new Error("Unexpected Android app bundle contents");
      const verbose=await processTool("tar",["-tvzf",downloaded.file],bundleDir,30000);
-     if(verbose.split(/\\r?\\n/).some(line=>/^[lh]/.test(line)))throw new Error("Android app bundle contains links");
+     if(verbose.split(/\r?\n/).some(line=>/^[lh]/.test(line)))throw new Error("Android app bundle contains links");
      await processTool("tar",["-xzf",downloaded.file,"-C",bundleDir,"--no-same-owner","--no-same-permissions"],bundleDir,30000);
      const manifest=JSON.parse(readFileSync(join(bundleDir,"manifest.json"),"utf8"));
      apkPath=join(bundleDir,"application.apk");
@@ -422,7 +422,7 @@ async function executeJob(config,job){
     const packageName=job.parameters?.package_name||"";
     if(!/^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$/.test(packageName))throw new Error("Valid Android package name is required");
     const paths=await processTool(adb,["-s",device.serial,"shell","pm","path",packageName],process.cwd(),30000);
-    const remote=paths.split(/\\r?\\n/).map(x=>x.trim().replace(/^package:/,"")).find(x=>x.startsWith("/data/app/")&&x.endsWith(".apk"));
+    const remote=paths.split(/\r?\n/).map(x=>x.trim().replace(/^package:/,"")).find(x=>x.startsWith("/data/app/")&&x.endsWith(".apk"));
     if(!remote)throw new Error("Installed base APK is not readable on this Android build");
     const dir=join(configDir,"artifacts");mkdirSync(dir,{recursive:true,mode:0o700});
     const local=join(dir,job.id+"-"+packageName.replace(/[^A-Za-z0-9_.-]/g,"_")+".apk");
@@ -525,9 +525,9 @@ async function detectPackages(){
  try{const found=await inspectInstalledToolkit({family:"android-sdk",version:"2026.2.2-patch1"});if(found.installed)packages.push({name:"android-sdk",version:"2026.2.2-patch1",verified:true});}catch{}
  try{
   const output=await processTool("adb",["version"],process.cwd(),10000);
-  packages.push({name:"adb",version:(output.split(/\\r?\\n/)[0]||"installed").slice(0,90)});
+  packages.push({name:"adb",version:(output.split(/\r?\n/)[0]||"installed").slice(0,90)});
   const listing=await processTool("adb",["devices"],process.cwd(),10000);
-  for(const line of listing.split(/\\r?\\n/).slice(1)){
+  for(const line of listing.split(/\r?\n/).slice(1)){
    const match=line.match(/^([A-Za-z0-9._:-]{3,128})\\s+device$/);if(!match)continue;
    const serial=match[1];
    const api=(await processTool("adb",["-s",serial,"shell","getprop","ro.build.version.sdk"],process.cwd(),10000)).trim();
@@ -542,7 +542,7 @@ async function scanAndroidDevices(){
   const adb=(await processTool("bash",["-lc","command -v adb"],process.cwd(),10000)).trim();
   if(!adb.startsWith("/"))return [];
   const listing=await processTool(adb,["devices","-l"],process.cwd(),10000),devices=[];
-  for(const line of listing.split(/\\r?\\n/).slice(1)){
+  for(const line of listing.split(/\r?\n/).slice(1)){
    const match=line.match(/^([A-Za-z0-9._:-]{3,128})\\s+device(?:\\s|$)/);if(!match)continue;
    const serial=match[1],prop=async key=>(await processTool(adb,["-s",serial,"shell","getprop",key],process.cwd(),10000)).trim();
    const [api,abi,release,model,product]=await Promise.all([
