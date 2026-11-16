@@ -445,6 +445,13 @@ install_android_app(){
   local device; device="$(probe_android "$serial")"
   api="$(sed -n 's/^api=//p' <<< "$device" | head -n1)"
   abi="$(sed -n 's/^abi=//p' <<< "$device" | head -n1)"
+  python3 - "$manifest" "$profile" <<'PY'
+import json,sys
+m=json.load(open(sys.argv[1]))
+if m.get("artifactType")!="android-application-apk" or m.get("toolkit")!="android-sdk" or m.get("toolkitVersion")!="2026.2.2-patch1":
+ raise SystemExit("APK manifest type or toolkit version mismatch")
+if m.get("targetProfile")!=sys.argv[2]: raise SystemExit("APK was built for a different Android target profile")
+PY
   package="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("packageName",""))' "$manifest")"
   local expected_hash
   expected_hash="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("sha256",""))' "$manifest")"
