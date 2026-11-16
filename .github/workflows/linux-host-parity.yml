@@ -26,7 +26,8 @@ jobs:
       - name: Host and runner tests
         run: |
           (cd host && go test ./...)
-          node --test runner/service.test.mjs runner/sdk_install.test.mjs
+          node --check runner/agent.mjs runner/toolkit_runtime.mjs
+          node --test runner/service.test.mjs runner/sdk_install.test.mjs runner/toolkit_runtime.test.mjs
           bash -n scripts/install-linux.sh scripts/uninstall-linux.sh
       - name: Wrong-architecture selection fails before package changes
         run: |
