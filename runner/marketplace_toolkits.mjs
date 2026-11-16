@@ -128,7 +128,9 @@ export async function installEspIdf({version,os=osName(),architecture=archName()
  const release=ESP_IDF_RELEASES[version];if(!release)throw new Error("ESP-IDF version is not in the approved marketplace catalog");
  const recipe=release.targets[hostKey(os,architecture)];if(!recipe)throw new Error("ESP-IDF is not supported on this builder OS/architecture");
  const archive=await downloadFn(recipe.url);const digest=verifyDigest(archive,recipe.sha256);
- const parent=join(root,"esp-idf",version);await fs.mkdir(dirname(parent),{recursive:true,mode:0o700});
+ const parent=join(root,"esp-idf",version);
+ if(existsSync(parent)){const existing=await inspectInstalledToolkit({family:"esp-idf",version,root});if(existing.installed)return {...existing,status:"already-installed"};await fs.rm(parent,{recursive:true,force:true});}
+ await fs.mkdir(dirname(parent),{recursive:true,mode:0o700});
  const stage=await fs.mkdtemp(join(dirname(parent),".stage-"+version+"-"));
  try{
   await extractZip(archive,stage,{maxEntries:128,maxExpanded:128*1024*1024});
@@ -148,7 +150,7 @@ export async function installEspIdf({version,os=osName(),architecture=archName()
   await fs.mkdir(join(parent,"metadata"),{recursive:true,mode:0o700});
   await fs.writeFile(join(parent,"metadata","maincreate-install.json"),JSON.stringify({family:"esp-idf",version,os,architecture,eimVersion:release.eim,sha256:digest,installedAt:new Date().toISOString()},null,2),{mode:0o600});
   return {family:"esp-idf",version,status:"installed",path:idfPath,eimVersion:release.eim,sha256:digest};
- }finally{await fs.rm(stage,{recursive:true,force:true});}
+ }catch(e){await fs.rm(parent,{recursive:true,force:true});throw e;}finally{await fs.rm(stage,{recursive:true,force:true});}
 }
 
 export async function installAndroidSdk({os=osName(),architecture=archName(),root=sdkRoot(),acceptLicenses=false,downloadFn=download,runner=run}={}){
