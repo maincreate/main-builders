@@ -181,7 +181,7 @@ async function executeJob(config,job){
     const checkout=await verifiedCheckout(job),version=job.parameters?.toolkit_version;
     const built=await buildEspIdfProject({projectDir:checkout,version});
     built.manifest.sourceRevision=job.parameters.revision;
-    writeFileSync(built.manifestPath,JSON.stringify(built.manifest,null,2)+"\\n",{mode:0o600});
+    writeFileSync(built.manifestPath,JSON.stringify(built.manifest,null,2)+"\n",{mode:0o600});
     ids.push(await uploadAsset(config,job.id,"maincreate-firmware.bin","application/octet-stream",readFileSync(built.imagePath)));
     ids.push(await uploadAsset(config,job.id,"maincreate-firmware-manifest.json","application/json",readFileSync(built.manifestPath)));
     out.push(built.log);
@@ -189,7 +189,7 @@ async function executeJob(config,job){
     const checkout=await verifiedCheckout(job);
     const built=await buildAndroidApp({projectDir:checkout,version:job.parameters?.toolkit_version,targetProfile:job.parameters?.target_profile});
     built.manifest.sourceRevision=job.parameters.revision;
-    writeFileSync(built.manifestPath,JSON.stringify(built.manifest,null,2)+"\\n",{mode:0o600});
+    writeFileSync(built.manifestPath,JSON.stringify(built.manifest,null,2)+"\n",{mode:0o600});
     for(const apk of built.apks)ids.push(await uploadAsset(config,job.id,apk.name,"application/vnd.android.package-archive",readFileSync(apk.path)));
     ids.push(await uploadAsset(config,job.id,"maincreate-android-manifest.json","application/json",readFileSync(built.manifestPath)));
     out.push(built.log+"; uploaded "+built.apks.length+" APK(s)");
@@ -236,7 +236,6 @@ async function executeJob(config,job){
      if(!entry)throw new Error("Select an application package when the build produced multiple APKs");
      const apk=candidates.find(a=>a.name===entry.name);
      if(!apk)throw new Error("Selected Android APK is missing from the artifact handoff");
-     if(!entry)throw new Error("APK is not listed in the Android build manifest");
      if(job.parameters?.package_name&&entry.packageName!==job.parameters.package_name)throw new Error("APK package does not match selected application");
      const result=await deployAndroidApk({adbPath:await localAdbPath(),serial:job.parameters?.device_serial,
       apkPath:apk.path,manifest,deviceProfile:job.parameters?.device_profile||"avalue-epd-42s"});
