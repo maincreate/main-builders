@@ -4,7 +4,7 @@ import {
   readdirSync, realpathSync, rmSync, statSync, writeFileSync, chmodSync
 } from "node:fs";
 import {promises as fs} from "node:fs";
-import {join, dirname, resolve, relative, sep} from "node:path";
+import {join, dirname, resolve, relative, sep, basename} from "node:path";
 import {homedir, arch} from "node:os";
 import {spawn} from "node:child_process";
 
