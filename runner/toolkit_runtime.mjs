@@ -187,15 +187,21 @@ function javaHomeFromPath(path){
  const real=realpathSync(path);return dirname(dirname(real));
 }
 async function java17(){
- let java=process.env.JAVA_HOME?join(process.env.JAVA_HOME,"bin","java"):"java";
- const result=await run(java,["-version"],{timeoutMs:10000});
- const match=result.output.match(/version "(\d+)/)||result.output.match(/openjdk (\d+)/i);
- if(!match||Number(match[1])<17)throw new Error("Android SDK requires JDK 17 or newer; install JDK 17 on this builder first");
- if(!process.env.JAVA_HOME){
-  const which=await run("sh",["-lc","command -v java"],{timeoutMs:5000});
-  return javaHomeFromPath(which.stdout.trim());
+ const candidates=[];
+ if(process.env.JAVA_HOME)candidates.push(process.env.JAVA_HOME);
+ const jvmRoot="/usr/lib/jvm";
+ if(existsSync(jvmRoot)){
+  for(const name of readdirSync(jvmRoot))if(/^java-17-openjdk/.test(name))candidates.push(join(jvmRoot,name));
  }
- return process.env.JAVA_HOME;
+ for(const home of [...new Set(candidates)]){
+  const java=join(home,"bin","java");if(!existsSync(java))continue;
+  try{
+   const result=await run(java,["-version"],{timeoutMs:10000});
+   const match=result.output.match(/version "(d+)/)||result.output.match(/openjdk (d+)/i);
+   if(match&&Number(match[1])===17)return home;
+  }catch{}
+ }
+ throw new Error("Android SDK profile requires JDK 17 exactly. Install JDK 17 on this builder before installing the Android toolkit.");
 }
 export async function installAndroidSdk({version=ANDROID_SDK_RELEASE.version,os="linux",architecture=arch(),root=toolkitRoot(),downloadFn=downloadVerified}={}){
  if(version!==ANDROID_SDK_RELEASE.version)throw new Error("Android SDK version is not in the current endorsed catalog");
