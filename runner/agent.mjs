@@ -83,6 +83,45 @@ async function uploadAsset(config,jobId,name,mime,data){
  await post("/api/agent/assets",{...base,action:"finish",asset_id:id,sha256:digest},config.token);
  return id;
 }
+async function downloadAsset(config,jobId,assetId){
+ if(!/^[a-f0-9]{32}$/.test(assetId))throw new Error("Invalid source artifact ID");
+ const chunks=[];let offset=0,meta=null;
+ for(let i=0;i<3000;i++){
+  const part=await post("/api/agent/assets",{id:config.id,job_id:jobId,action:"download",asset_id:assetId,offset,length:48*1024},config.token);
+  if(!meta)meta=part.asset;
+  if(!part||part.offset!==offset||typeof part.content_base64!=="string")throw new Error("Invalid artifact download response");
+  const data=Buffer.from(part.content_base64,"base64");
+  if(!data.length||offset+data.length>128*1024*1024)throw new Error("Artifact exceeds transfer limits");
+  chunks.push(data);offset+=data.length;
+  if(part.complete)break;
+  if(i===2999)throw new Error("Artifact transfer exceeded chunk limit");
+ }
+ const data=Buffer.concat(chunks);
+ if(!meta||data.length!==meta.size||createHash("sha256").update(data).digest("hex")!==meta.sha256)
+  throw new Error("Downloaded artifact size or SHA-256 does not match the completed build");
+ const dir=join(configDir,"artifacts");mkdirSync(dir,{recursive:true,mode:0o700});
+ const file=join(dir,assetId+"-"+meta.name);writeFileSync(file,data,{mode:0o600});
+ return {file,asset:meta};
+}
+async function findAdb(){
+ const output=(await processTool("bash",["-lc","command -v adb"],process.cwd(),10000)).trim();
+ if(!output.startsWith("/"))throw new Error("ADB executable not found on this deployment runner");
+ await processTool(output,["version"],process.cwd(),10000);
+ return output;
+}
+async function authorizedAndroidDevice(adb,serial,expectedApi=22){
+ if(typeof serial!=="string"||serial.length<3||serial.length>128||/[\\s\\x00-\\x1f]/.test(serial))
+  throw new Error("An exact ADB device serial is required");
+ const listing=await processTool(adb,["devices","-l"],process.cwd(),15000);
+ const row=listing.split(/\\r?\\n/).find(line=>line.startsWith(serial+"\\t")||line.startsWith(serial+" "));
+ if(!row||!/\\sdevice(?:\\s|$)/.test(row))throw new Error("The selected Android device is not connected and ADB-authorized");
+ const readProp=async key=>(await processTool(adb,["-s",serial,"shell","getprop",key],process.cwd(),15000)).trim();
+ const api=await readProp("ro.build.version.sdk");
+ if(expectedApi!==null&&api!==String(expectedApi))throw new Error("Android API mismatch: expected "+expectedApi+", observed "+api);
+ const abi=await readProp("ro.product.cpu.abi");
+ if(expectedApi===22&&abi!=="armeabi-v7a")throw new Error("Legacy E Ink target ABI mismatch: "+abi);
+ return {serial,api,abi,release:await readProp("ro.build.version.release")};
+}
 function gatherFirmware(dir){
  const build=join(dir,"build"),items=[];
  try{
@@ -162,6 +201,32 @@ async function executeJob(config,job){
     if(!apks.length)throw new Error("Android build completed without an APK artifact");
     for(const file of apks.slice(0,10)){const data=readFileSync(file);ids.push(await uploadAsset(config,job.id,file.split(/[\\/]/).pop(),"application/vnd.android.package-archive",data));}
     ids.push(await uploadAsset(config,job.id,"android-build-log.txt","text/plain",Buffer.from(output||"Build completed")));
+   }else if(step.capability==="android.app.deploy"||step.capability==="android.app.restore"){
+    const profile=job.parameters?.device_profile||"avalue-epd-42s";
+    if(profile!=="avalue-epd-42s")throw new Error("Unknown Android device profile");
+    const adb=await findAdb(),device=await authorizedAndroidDevice(adb,job.parameters?.device_serial,22);
+    const packageName=job.parameters?.package_name||"";
+    if(!/^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$/.test(packageName))throw new Error("Valid Android package name is required");
+    const downloaded=await downloadAsset(config,job.id,job.parameters?.source_asset_id);
+    if(!downloaded.asset.name.endsWith(".apk"))throw new Error("Android deployment requires an APK artifact");
+    const output=await processTool(adb,["-s",device.serial,"install","-r",downloaded.file],process.cwd(),5*60*1000);
+    const installed=await processTool(adb,["-s",device.serial,"shell","pm","path",packageName],process.cwd(),30000);
+    if(!installed.includes("package:"))throw new Error("APK installation returned success but package verification failed");
+    out.push("Installed "+packageName+" on Android "+device.release+" API "+device.api+" ("+device.abi+"): "+output.slice(-3000));
+   }else if(step.capability==="android.app.backup"){
+    const adb=await findAdb(),device=await authorizedAndroidDevice(adb,job.parameters?.device_serial,22);
+    const packageName=job.parameters?.package_name||"";
+    if(!/^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$/.test(packageName))throw new Error("Valid Android package name is required");
+    const paths=await processTool(adb,["-s",device.serial,"shell","pm","path",packageName],process.cwd(),30000);
+    const remote=paths.split(/\\r?\\n/).map(x=>x.trim().replace(/^package:/,"")).find(x=>x.startsWith("/data/app/")&&x.endsWith(".apk"));
+    if(!remote)throw new Error("Installed base APK is not readable on this Android build");
+    const dir=join(configDir,"artifacts");mkdirSync(dir,{recursive:true,mode:0o700});
+    const local=join(dir,job.id+"-"+packageName.replace(/[^A-Za-z0-9_.-]/g,"_")+".apk");
+    await processTool(adb,["-s",device.serial,"pull",remote,local],process.cwd(),5*60*1000);
+    const data=readFileSync(local);
+    const id=await uploadAsset(config,job.id,packageName.replace(/[^A-Za-z0-9_.-]/g,"_")+".apk","application/vnd.android.package-archive",data);
+    out.push("Backed up installed APK for "+packageName+" from Android API "+device.api+" ("+device.abi+"). Private application data is not included.");
+    ids.push(id);
    }else if(step.capability==="sdk.arduino_cli.install"){
     if(process.env.MAIN_RUNNER_ENABLE_SDK_INSTALLS!=="1")throw new Error("SDK installation adapter disabled by operator opt-in");
     const installed=await installArduinoCli({os,architecture:architecture});
