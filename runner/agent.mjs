@@ -192,6 +192,25 @@ async function extractFirmwareBundle(file,version,chip){
  const parsed=validateFlasherArgs(flasher,join(root,"build"));
  return {stage,root,build:join(root,"build"),manifest,parsed};
 }
+async function espTool(exportScript,port,args,timeout=5*60*1000){
+ return processTool("bash",["-lc",'source "$1" >/dev/null && shift && esptool --port "$1" "$@"',"maincreate",exportScript,port,...args],process.cwd(),timeout);
+}
+async function probeEspDevice(exportScript,port,expectedChip){
+ const chipOutput=await espTool(exportScript,port,["chip-id"],60000);
+ const normalized=chipOutput.toLowerCase().replace(/[-_\\s]/g,"");
+ if(!normalized.includes(expectedChip.toLowerCase().replace(/[-_\\s]/g,"")))
+  throw new Error("Connected ESP chip does not match expected target: "+chipOutput.slice(-1200));
+ const macOutput=await espTool(exportScript,port,["read-mac"],60000);
+ const mac=macOutput.match(/(?:MAC|MAC address)[:\\s]+([0-9a-f:]{17})/i)?.[1]?.toLowerCase();
+ if(!mac)throw new Error("Unable to obtain a stable ESP chip MAC identity");
+ const flashOutput=await espTool(exportScript,port,["flash-id"],60000);
+ const match=flashOutput.match(/Detected flash size:\\s*(\\d+)\\s*(KB|MB)/i);
+ if(!match)throw new Error("Unable to detect ESP flash size");
+ const flashBytes=Number(match[1])*(match[2].toUpperCase()==="MB"?1024*1024:1024);
+ if(!Number.isSafeInteger(flashBytes)||flashBytes<1024*1024||flashBytes>64*1024*1024)throw new Error("Detected ESP flash size outside supported backup range");
+ return {mac,chip:expectedChip,flashBytes,flashOutput};
+}
+function validatePort(port){if(typeof port!=="string"||!/^\\/dev\\/(ttyUSB|ttyACM)[0-9]+$/.test(port))throw new Error("Select an exact Linux USB serial port");return port;}
 async function executeJob(config,job){
  const results=[],out=[],ids=[],steps=job.steps||[];
  let failed=false;
@@ -279,6 +298,58 @@ async function executeJob(config,job){
     if(!apks.length)throw new Error("Android build completed without an APK artifact");
     for(const file of apks.slice(0,10)){const data=readFileSync(file);ids.push(await uploadAsset(config,job.id,file.split(/[\\/]/).pop(),"application/vnd.android.package-archive",data));}
     ids.push(await uploadAsset(config,job.id,"android-build-log.txt","text/plain",Buffer.from(output||"Build completed")));
+   }else if(step.capability==="firmware.esp_idf.backup"){
+    const version=job.parameters?.toolkit_version,chip=String(job.parameters?.target_chip||"").toLowerCase().replace(/-/g,"");
+    if(!["5.5.6","6.1.1"].includes(version)||!chip)throw new Error("Exact ESP-IDF version and target chip are required");
+    const port=validatePort(job.parameters?.port),installed=await inspectInstalledToolkit({family:"esp-idf",version});
+    if(!installed.installed)throw new Error("Selected ESP-IDF version is not installed");
+    const device=await probeEspDevice(installed.exportScript,port,chip);
+    const security=await espTool(installed.exportScript,port,["get-security-info"],60000);
+    if(/flash.?encryption[^\\n]*(?:enabled|true)|secure.?boot[^\\n]*(?:enabled|true)/i.test(security))
+     throw new Error("Refusing raw flash backup while flash encryption or secure boot is enabled");
+    const offset=Number.parseInt(job.parameters?.partition_table_offset||"0x8000");
+    if(!Number.isSafeInteger(offset)||offset<0||offset>device.flashBytes-4096)throw new Error("Invalid partition table offset");
+    const dir=mkdtempSync(join(configDir,"esp-backup-")),image=join(dir,"flash.bin");
+    await espTool(installed.exportScript,port,["read-flash","0","ALL",image],15*60*1000);
+    const data=readFileSync(image);if(data.length!==device.flashBytes)throw new Error("Flash readback size differs from detected flash size");
+    const partition=data.subarray(offset,offset+0xC00);
+    const manifest={kind:"maincreate-esp32-flash-backup",chip,mac:device.mac,flashBytes:device.flashBytes,
+     partitionTableOffset:offset,partitionTableSha256:createHash("sha256").update(partition).digest("hex"),
+     imageSha256:createHash("sha256").update(data).digest("hex"),createdAt:new Date().toISOString(),
+     securityInfo:security.slice(0,4000)};
+    writeFileSync(join(dir,"manifest.json"),JSON.stringify(manifest,null,2),{mode:0o600});
+    const archive=join(dir,"esp32-flash-backup.tar.gz");
+    await processTool("tar",["-czf",archive,"-C",dir,"flash.bin","manifest.json"],dir,5*60*1000);
+    const id=await uploadAsset(config,job.id,"esp32-flash-backup.tar.gz","application/gzip",readFileSync(archive));
+    out.push("Created full flash backup for "+device.mac+" ("+device.flashBytes+" bytes); security state checked. Private flash data is not exported.");
+    ids.push(id);rmSync(dir,{recursive:true,force:true});
+   }else if(step.capability==="firmware.esp_idf.restore"){
+    const version=job.parameters?.toolkit_version,chip=String(job.parameters?.target_chip||"").toLowerCase().replace(/-/g,"");
+    if(!["5.5.6","6.1.1"].includes(version)||!chip)throw new Error("Exact ESP-IDF version and target chip are required");
+    const port=validatePort(job.parameters?.port),installed=await inspectInstalledToolkit({family:"esp-idf",version});
+    if(!installed.installed)throw new Error("Selected ESP-IDF version is not installed");
+    const downloaded=await downloadAsset(config,job.id,job.parameters?.source_asset_id);
+    if(downloaded.asset.name!=="esp32-flash-backup.tar.gz")throw new Error("Expected an ESP32 flash backup archive");
+    const dir=mkdtempSync(join(configDir,"esp-restore-"));
+    const listing=await processTool("tar",["-tzf",downloaded.file],dir,60000);
+    const names=listing.split(/\\r?\\n/).filter(Boolean);
+    if(names.length!==2||names.some(n=>!["flash.bin","manifest.json"].includes(n)))throw new Error("Unexpected ESP32 backup archive contents");
+    await processTool("tar",["-xzf",downloaded.file,"-C",dir,"--no-same-owner","--no-same-permissions"],dir,60000);
+    const manifest=JSON.parse(readFileSync(join(dir,"manifest.json"),"utf8")),data=readFileSync(join(dir,"flash.bin"));
+    if(manifest.kind!=="maincreate-esp32-flash-backup"||manifest.chip!==chip||data.length!==manifest.flashBytes||
+       createHash("sha256").update(data).digest("hex")!==manifest.imageSha256)
+     throw new Error("ESP32 backup manifest, chip family or image checksum is invalid");
+    const device=await probeEspDevice(installed.exportScript,port,chip);
+    if(device.mac!==manifest.mac||device.flashBytes!==manifest.flashBytes)throw new Error("Restore target must be the exact source chip with matching flash size");
+    const offset=manifest.partitionTableOffset,partition=data.subarray(offset,offset+0xC00);
+    if(createHash("sha256").update(partition).digest("hex")!==manifest.partitionTableSha256)throw new Error("Backup partition table integrity check failed");
+    const current=join(dir,"current-partition.bin");
+    await espTool(installed.exportScript,port,["read-flash","0x"+offset.toString(16),"0xC00",current],120000);
+    if(createHash("sha256").update(readFileSync(current)).digest("hex")!==manifest.partitionTableSha256)
+     throw new Error("Target partition layout differs from backup; restore refused");
+    const output=await espTool(installed.exportScript,port,["write-flash","--flash-size","detect","0x0",join(dir,"flash.bin")],15*60*1000);
+    out.push("Restored full flash image to exact source ESP32 "+device.mac+": "+output.slice(-2500));
+    rmSync(dir,{recursive:true,force:true});
    }else if(step.capability==="android.app.deploy"||step.capability==="android.app.restore"){
     const profile=job.parameters?.device_profile||"avalue-epd-42s";
     if(profile!=="avalue-epd-42s")throw new Error("Unknown Android device profile");
