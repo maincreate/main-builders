@@ -54,9 +54,9 @@ function approvedCheckout(repo){
  if(!statSync(actual).isDirectory())throw new Error("Checkout is not a directory");
  return actual;
 }
-async function processTool(bin,args,cwd,timeoutMs){
+async function processTool(bin,args,cwd,timeoutMs,env={}){
  return new Promise((resolve,reject)=>{
-  const child=spawn(bin,args,{cwd,shell:false,windowsHide:true,stdio:["ignore","pipe","pipe"]});
+  const child=spawn(bin,args,{cwd,shell:false,windowsHide:true,stdio:["ignore","pipe","pipe"],env:{...process.env,...env}});
   let combined="",wasKilled=false;
   const capture=chunk=>{combined+=(chunk?.toString("utf8")||"");if(combined.length>20000)combined=combined.slice(-20000);};
   child.stdout.on("data",capture);child.stderr.on("data",capture);
@@ -153,7 +153,7 @@ async function executeJob(config,job){
     const gradle=join(checkout,process.platform==="win32"?"gradlew.bat":"gradlew");
     if(!statSync(gradle).isFile())throw new Error("Project Gradle wrapper is missing");
     const task=job.parameters?.target_profile==="android-legacy-api22-eink"?"assembleDebug":"assembleDebug";
-    const output=await processTool(gradle,["--no-daemon",task],checkout,45*60*1000);
+    const output=await processTool(gradle,["--no-daemon",task],checkout,45*60*1000,{ANDROID_HOME:installed.sdkRoot,ANDROID_SDK_ROOT:installed.sdkRoot});
     out.push(output.slice(-14000));
     const apkRoot=join(checkout,"app","build","outputs","apk");
     const apks=[];
