@@ -116,10 +116,12 @@ install_android_sdk(){
   rm -rf "$stage";trap - RETURN
   export ANDROID_HOME="$ANDROID_ROOT" ANDROID_SDK_ROOT="$ANDROID_ROOT"
   local sdkmanager; sdkmanager="$(sdkmanager_path)"
+  set +o pipefail
   yes | "$sdkmanager" --sdk_root="$ANDROID_ROOT" --licenses >/dev/null
   yes | "$sdkmanager" --sdk_root="$ANDROID_ROOT" --install \
     "platform-tools" "platforms;android-$ANDROID_API_CURRENT" "platforms;android-$ANDROID_API_LEGACY" \
     "build-tools;$ANDROID_BUILD_TOOLS" >/dev/null
+  set -o pipefail
   verify_android_sdk "$version"
 }
 
@@ -272,9 +274,26 @@ flash_esp32(){
   mac="$(sed -n 's/^MAINCREATE_MAC=//p' <<< "$observed" | tail -n1)"
   [[ "$mac" == "\${expected_mac^^}" ]] || die "Connected ESP32 eFuse MAC mismatch; expected $expected_mac, found $mac"
   if [[ "$manifest_chip" != "unknown" ]]; then
-    [[ "\${chip,,}" == "\${manifest_chip,,}" ]] || die "Firmware target $manifest_chip does not match detected chip $chip"
+    [[ "${chip,,}" == "${manifest_chip,,}" ]] || die "Firmware target $manifest_chip does not match detected chip $chip"
   fi
-  p="$(quote "$port")";file="$(quote "$artifact_dir/maincreate-firmware.bin")"
+  local flash_info actual_flash
+  p="$(quote "$port")"
+  flash_info="$(eim_run "$version" "esptool.py --port $p flash_id" 2>&1)" ||
+    flash_info="$(eim_run "$version" "esptool --port $p flash-id" 2>&1)" ||
+    die "Unable to verify target flash size"
+  actual_flash="$(flash_size_bytes "$flash_info")"
+  if [[ "$manifest_flash" != "auto" ]]; then
+    local expected_flash
+    expected_flash="$(python3 - "$manifest_flash" <<'PY'
+import re,sys
+m=re.fullmatch(r'(\d+)(MB|KB)',sys.argv[1],re.I)
+if not m: raise SystemExit("Invalid firmware flash-size metadata")
+print(int(m.group(1))*(1024*1024 if m.group(2).upper()=="MB" else 1024))
+PY
+)"
+    [[ "$actual_flash" == "$expected_flash" ]] || die "Firmware expects $manifest_flash flash, device reports $actual_flash bytes"
+  fi
+  file="$(quote "$artifact_dir/maincreate-firmware.bin")"
   eim_run "$version" "esptool.py --port $p write_flash 0x0 $file" ||
     eim_run "$version" "esptool --port $p write-flash 0x0 $file"
   printf 'Firmware flashed successfully to %s (%s, MAC %s)\n' "$chip" "$port" "$mac"
@@ -340,9 +359,12 @@ PY
   [[ "\${recorded_chip,,}" == "\${chip,,}" ]] || die "Backup chip family does not match target"
   [[ "$(sha256 "$backup_dir/esp32-full-flash.bin")" == "$digest" ]] || die "Backup SHA-256 verification failed"
   p="$(quote "$port")";file="$(quote "$backup_dir/esp32-full-flash.bin")"
-  eim_run "$version" "esptool.py --port $p flash_id" >/dev/null 2>&1 ||
-    eim_run "$version" "esptool --port $p flash-id" >/dev/null 2>&1
-  # The full-flash image length is the authoritative backup flash-size check.
+  local flash_info actual_size
+  flash_info="$(eim_run "$version" "esptool.py --port $p flash_id" 2>&1)" ||
+    flash_info="$(eim_run "$version" "esptool --port $p flash-id" 2>&1)" ||
+    die "Unable to verify target flash size"
+  actual_size="$(flash_size_bytes "$flash_info")"
+  [[ "$actual_size" == "$recorded_size" ]] || die "Backup flash size does not match the connected device"
   size="$(stat -c '%s' "$backup_dir/esp32-full-flash.bin")"
   [[ "$size" == "$recorded_size" ]] || die "Backup length does not match its recorded flash size"
   eim_run "$version" "esptool.py --port $p write_flash 0x0 $file" ||
