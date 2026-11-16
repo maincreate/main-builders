@@ -193,7 +193,7 @@ async function extractFirmwareBundle(file,version,chip){
  return {stage,root,build:join(root,"build"),manifest,parsed};
 }
 async function espTool(exportScript,port,args,timeout=5*60*1000){
- return processTool("bash",["-lc",'source "$1" >/dev/null && shift && esptool --port "$1" "$@"',"maincreate",exportScript,port,...args],process.cwd(),timeout);
+ return processTool("bash",["-lc",'source "$1" >/dev/null && esptool --port "$2" "${@:3}"',"maincreate",exportScript,port,...args],process.cwd(),timeout);
 }
 async function probeEspDevice(exportScript,port,expectedChip){
  const chipOutput=await espTool(exportScript,port,["chip-id"],60000);
