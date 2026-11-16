@@ -320,6 +320,12 @@ flash_esp32(){
   valid_mac "$expected_mac" || die "Expected eFuse MAC is required"
   [[ -s "$artifact_dir/maincreate-firmware.bin" && -s "$artifact_dir/maincreate-manifest.json" ]] || die "Firmware artifact and manifest are required"
   local manifest_chip manifest_flash manifest_hash observed chip mac p file
+  python3 - "$artifact_dir/maincreate-manifest.json" "$version" <<'PY'
+import json,sys
+m=json.load(open(sys.argv[1]))
+if m.get("artifactType")!="esp32-firmware-bundle" or m.get("toolkit")!="esp-idf" or m.get("toolkitVersion")!=sys.argv[2]:
+ raise SystemExit("Firmware manifest type or exact toolkit version mismatch")
+PY
   manifest_chip="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("targetChip","unknown"))' "$artifact_dir/maincreate-manifest.json")"
   manifest_flash="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("flashSize","auto"))' "$artifact_dir/maincreate-manifest.json")"
   manifest_hash="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("sha256",""))' "$artifact_dir/maincreate-manifest.json")"
@@ -404,9 +410,11 @@ restore_esp32(){
   chip="$(sed -n 's/^MAINCREATE_CHIP=//p' <<< "$observed" | tail -n1)"
   mac="$(sed -n 's/^MAINCREATE_MAC=//p' <<< "$observed" | tail -n1)"
   [[ "$mac" == "\${expected_mac^^}" ]] || die "Connected ESP32 eFuse MAC mismatch"
-  read -r recorded_mac recorded_chip recorded_size digest < <(python3 - "$backup_dir/backup-manifest.json" <<'PY'
+  read -r recorded_mac recorded_chip recorded_size digest < <(python3 - "$backup_dir/backup-manifest.json" "$version" <<'PY'
 import json,sys
 m=json.load(open(sys.argv[1]))
+if m.get("artifactType")!="esp32-full-flash-backup" or m.get("toolkit")!="esp-idf" or m.get("toolkitVersion")!=sys.argv[2]:
+ raise SystemExit("Backup manifest type or exact toolkit version mismatch")
 print(m.get("sourceDeviceMac",""),m.get("chip",""),m.get("flashSizeBytes",""),m.get("sha256",""))
 PY
 )
