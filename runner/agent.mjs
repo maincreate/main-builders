@@ -139,7 +139,7 @@ function gatherFirmware(dir){
 function firmwareFiles(root,names){
  const files=[];
  for(const name of [...new Set(["flasher_args.json",...names])].sort()){
-  if(typeof name!=="string"||name.startsWith("/")||name.split("/").includes("..")||name.includes("\\\\"))throw new Error("Unsafe firmware file path");
+  if(typeof name!=="string"||name.startsWith("/")||name.split("/").includes("..")||name.includes("\\"))throw new Error("Unsafe firmware file path");
   const absolute=join(root,name),actual=realpathSync(absolute);
   if(!actual.startsWith(realpathSync(root)+sep)||!lstatSync(actual).isFile())throw new Error("Firmware bundle file is not a regular file");
   const data=readFileSync(actual);if(data.length>32*1024*1024)throw new Error("Firmware file exceeds bundle limits");
@@ -150,7 +150,7 @@ function firmwareFiles(root,names){
 function verifyFirmwareFiles(root,files){
  if(!Array.isArray(files)||!files.length||files.length>5000)throw new Error("Invalid firmware file manifest");
  for(const item of files){
-  if(typeof item.name!=="string"||item.name.startsWith("/")||item.name.split("/").includes("..")||item.name.includes("\\\\"))
+  if(typeof item.name!=="string"||item.name.startsWith("/")||item.name.split("/").includes("..")||item.name.includes("\\"))
    throw new Error("Unsafe firmware file manifest entry");
   const file=join(root,item.name),actual=realpathSync(file);
   if(!actual.startsWith(realpathSync(root)+sep)||!statSync(actual).isFile())throw new Error("Firmware bundle file escaped its root");
@@ -180,7 +180,7 @@ async function extractFirmwareBundle(file,version,chip){
  const stage=mkdtempSync(join(configDir,"firmware-flash-"));
  const listing=await processTool("tar",["-tzf",file],stage,60000);
  const names=listing.split(/\r?\n/).filter(Boolean);
- if(!names.length||names.length>5000||names.some(n=>n.startsWith("/")||n.split("/").includes("..")||n.includes("\\\\")))
+ if(!names.length||names.length>5000||names.some(n=>n.startsWith("/")||n.split("/").includes("..")||n.includes("\\")))
   throw new Error("Firmware archive contains unsafe paths");
  const verbose=await processTool("tar",["-tvzf",file],stage,60000);
  if(verbose.split(/\r?\n/).some(line=>/^[lh]/.test(line)))throw new Error("Firmware archive contains links");
@@ -296,9 +296,9 @@ async function executeJob(config,job){
     const wrapperProperties=join(checkout,"gradle","wrapper","gradle-wrapper.properties");
     if(!statSync(wrapperProperties).isFile())throw new Error("Pinned Gradle wrapper properties are missing");
     const wrapperConfig=readFileSync(wrapperProperties,"utf8");
-    const distribution=wrapperConfig.match(/^distributionUrl\\s*=\\s*(.+)$/m)?.[1]?.trim().replaceAll("\\\\:",":");
-    const checksum=wrapperConfig.match(/^distributionSha256Sum\\s*=\\s*([a-fA-F0-9]{64})$/m)?.[1];
-    if(!/^https:\\/\\/services\\.gradle\\.org\\/distributions\\/gradle-9\\.6\\.0-(bin|all)\\.zip$/.test(distribution||"")||!checksum)
+    const distribution=wrapperConfig.match(/^distributionUrl\s*=\s*(.+)$/m)?.[1]?.trim().replaceAll("\\:",":");
+    const checksum=wrapperConfig.match(/^distributionSha256Sum\s*=\s*([a-fA-F0-9]{64})$/m)?.[1];
+    if(!/^https:\/\/services\.gradle\.org\/distributions\/gradle-9\.6\.0-(bin|all)\.zip$/.test(distribution||"")||!checksum)
      throw new Error("Gradle wrapper must use an HTTPS official Gradle distribution with a pinned SHA-256");
     const gradle=join(checkout,"gradlew");
     if(!statSync(gradle).isFile())throw new Error("Project Gradle wrapper is missing");
