@@ -471,6 +471,14 @@ async function detectPackages(){
  try{
   const output=await processTool("adb",["version"],process.cwd(),10000);
   packages.push({name:"adb",version:(output.split(/\\r?\\n/)[0]||"installed").slice(0,90)});
+  const listing=await processTool("adb",["devices"],process.cwd(),10000);
+  for(const line of listing.split(/\\r?\\n/).slice(1)){
+   const match=line.match(/^([A-Za-z0-9._:-]{3,128})\\s+device$/);if(!match)continue;
+   const serial=match[1];
+   const api=(await processTool("adb",["-s",serial,"shell","getprop","ro.build.version.sdk"],process.cwd(),10000)).trim();
+   const abi=(await processTool("adb",["-s",serial,"shell","getprop","ro.product.cpu.abi"],process.cwd(),10000)).trim();
+   if(api==="22"&&abi==="armeabi-v7a"){packages.push({name:"android-device-api22",version:"connected"});break;}
+  }
  }catch{}
  return packages;
 }
