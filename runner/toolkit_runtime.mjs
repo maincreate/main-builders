@@ -39,7 +39,8 @@ const safeVersion=v=>typeof v==="string"&&/^\d+\.\d+\.\d+$/.test(v);
 const inside=(root,path)=>{const r=relative(resolve(root),resolve(path));return r!==""&&!r.startsWith(".."+sep)&&r!==".."&&!resolve(path).startsWith(sep+sep);};
 const hash=data=>createHash("sha256").update(data).digest("hex");
 const safePort=p=>typeof p==="string"&&(/^\/dev\/tty(?:USB|ACM)\d+$/.test(p)||/^\/dev\/serial\/by-id\/[A-Za-z0-9._-]+$/.test(p));
-const normChip=s=>String(s||"").toLowerCase().replace(/[^a-z0-9]/g,"").replace(/^esp/,"");
+export const normalizeEspChip=s=>String(s||"").toLowerCase().replace(/[^a-z0-9]/g,"").replace(/^esp/,"");
+export const validateSerialPort=s=>safePort(s);
 
 export function toolkitRoot(base=BASE){if(typeof base!=="string"||!base)throw new Error("Invalid toolkit root");return resolve(base);}
 export function idfVersionPath(version,root=toolkitRoot()){if(!safeVersion(version))throw new Error("Invalid ESP-IDF version");return join(root,"esp-idf",version);}
@@ -136,7 +137,7 @@ export async function verifyEspIdf(version,{root=toolkitRoot()}={}){
  if(!inside(join(root,"esp-idf",version),record.idfPath)||!existsSync(join(record.idfPath,"export.sh")))
   throw new Error("ESP-IDF installation path is missing or outside its version root");
  const result=await runIdf(record.idfPath,["--version"],30000);
- if(!new RegExp("\\\\bv?"+version.replace(/\./g,"\\\\.")+"\\\\b").test(result.output))
+ if(!new RegExp("\\bv?"+version.replace(/\./g,"\\.")+"\\b").test(result.output))
   throw new Error("Installed ESP-IDF does not match selected version "+version);
  return {...record,verified:true,versionOutput:result.output.slice(0,500)};
 }
@@ -334,7 +335,7 @@ export async function flashEsp32({port,version="6.1.1",imagePath,manifest,root=t
  if(!existsSync(imagePath)||!manifest||manifest.artifactType!=="esp32-firmware-image")throw new Error("Verified ESP32 firmware artifact is required");
  const actualHash=hash(readFileSync(imagePath));if(actualHash!==manifest.sha256)throw new Error("ESP32 firmware artifact checksum mismatch");
  const probe=await probeEsp32({port,version,root});
- if(normChip(probe.chip)!==normChip(manifest.target))throw new Error("Connected chip "+probe.chip+" does not match firmware target "+manifest.target);
+ if(normalizeEspChip(probe.chip)!==normalizeEspChip(manifest.target))throw new Error("Connected chip "+probe.chip+" does not match firmware target "+manifest.target);
  const installed=await verifyEspIdf(version,{root});
  try{return await esptool(installed.idfPath,["--port",port,"write-flash","0x0",imagePath],180000);}
  catch(first){try{return await esptool(installed.idfPath,["--port",port,"write_flash","0x0",imagePath],180000);}catch{throw first;}}
@@ -349,8 +350,11 @@ export async function backupEsp32Firmware({port,version="6.1.1",outputPath,devic
  if(!sizeMatch)throw new Error("Could not determine flash size; refusing an unbounded flash readback");
  const flashBytes=Number(sizeMatch[1])*(sizeMatch[2].toUpperCase()==="MB"?1024*1024:1024);
  if(!Number.isSafeInteger(flashBytes)||flashBytes<1024*1024||flashBytes>64*1024*1024)throw new Error("Detected flash size is outside safe backup bounds");
- try{await esptool(installed.idfPath,["--port",port,"get-security-info"],45000);}
- catch{throw new Error("ESP32 security state could not be verified; firmware readback backup is disabled");}
+ let security;
+ try{security=await esptool(installed.idfPath,["--port",port,"get-security-info"],45000);}
+ catch{try{security=await esptool(installed.idfPath,["--port",port,"get_security_info"],45000);}catch{throw new Error("ESP32 security state could not be verified; firmware readback backup is disabled");}}
+ if(!/Secure Boot:\\s*Disabled/i.test(security.output)||!/Flash Encryption:\\s*Disabled/i.test(security.output))
+  throw new Error("ESP32 secure boot or flash encryption is enabled/unknown; raw firmware backup is not safely restorable");
  try{await esptool(installed.idfPath,["--port",port,"read-flash","0x0",String(flashBytes),outputPath],180000);}
  catch(first){try{await esptool(installed.idfPath,["--port",port,"read_flash","0x0",String(flashBytes),outputPath],180000);}catch{throw first;}}
  const image=readFileSync(outputPath),manifest={schema:1,artifactType:"esp32-firmware-backup",
@@ -409,12 +413,15 @@ export async function backupAndroidApk({adbPath,serial,packageName,outputDir}={}
  const manifestPath=join(outputDir,"android-app-backup.json");writeFileSync(manifestPath,JSON.stringify(manifest,null,2)+"\n",{mode:0o600});
  return {outputs,manifest,manifestPath};
 }
-export async function restoreAndroidApk({adbPath,serial,apkPath,manifest,packageName}={}){
+export async function restoreAndroidApk({adbPath,serial,apkPaths,manifest,packageName}={}){
  if(!manifest||manifest.artifactType!=="android-app-backup"||manifest.deviceSerial!==serial||manifest.packageName!==packageName)
   throw new Error("Android app restore requires the original device serial and package identity");
- const item=manifest.outputs?.find(x=>x.name===apkPath.split(/[\\/]/).at(-1));
- if(!item||hash(readFileSync(apkPath))!==item.sha256)throw new Error("Android app backup checksum mismatch");
- return run(adbPath,["-s",serial,"install","-r",apkPath],{timeoutMs:180000});
+ if(!Array.isArray(apkPaths)||!apkPaths.length||apkPaths.length!==manifest.outputs?.length)
+  throw new Error("Android backup is missing one or more APK splits");
+ for(const path of apkPaths){const item=manifest.outputs.find(x=>x.name===path.split(/[\\/]/).at(-1));
+  if(!item||hash(readFileSync(path))!==item.sha256)throw new Error("Android app backup checksum mismatch");}
+ const args=apkPaths.length===1?["-s",serial,"install","-r",apkPaths[0]]:["-s",serial,"install-multiple","-r",...apkPaths];
+ return run(adbPath,args,{timeoutMs:180000});
 }
 export function removeToolkit({family,version,root=toolkitRoot(),dryRun=true}={}){
  const paths=[];
