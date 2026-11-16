@@ -169,7 +169,7 @@ export async function installEspIdf({version,os="linux",architecture=arch(),root
    throw new Error("EIM installed a different ESP-IDF version than requested");
   const record={activationScript,eimPath:eim,eimVersion:EIM_RELEASE.version,installerSha256:recipe.sha256,versionOutput:checked.output};
   saveManifest("esp-idf",version,record,root);
-  return {status:"installed",family:"esp-idf",version,idfPath,eimVersion:EIM_RELEASE.version,sha256:recipe.sha256};
+  return {status:"installed",family:"esp-idf",version,activationScript,eimVersion:EIM_RELEASE.version,sha256:recipe.sha256};
  }finally{rmSync(stage,{recursive:true,force:true});}
 }
 export async function verifyAndroidSdk({version=ANDROID_SDK_RELEASE.version,root=toolkitRoot()}={}){
@@ -334,26 +334,26 @@ export async function flashEsp32({port,version="6.1.1",imagePath,manifest,root=t
  const probe=await probeEsp32({port,version,root});
  if(normalizeEspChip(probe.chip)!==normalizeEspChip(manifest.target))throw new Error("Connected chip "+probe.chip+" does not match firmware target "+manifest.target);
  const installed=await verifyEspIdf(version,{root});
- try{return await esptool(installed.idfPath,["--port",port,"write-flash","0x0",imagePath],180000);}
- catch(first){try{return await esptool(installed.idfPath,["--port",port,"write_flash","0x0",imagePath],180000);}catch{throw first;}}
+ try{return await esptool(installed.activationScript,["--port",port,"write-flash","0x0",imagePath],180000);}
+ catch(first){try{return await esptool(installed.activationScript,["--port",port,"write_flash","0x0",imagePath],180000);}catch{throw first;}}
 }
 export async function backupEsp32Firmware({port,version="6.1.1",outputPath,deviceSerial,root=toolkitRoot()}={}){
  if(!safePort(port)||typeof deviceSerial!=="string"||!deviceSerial)throw new Error("Stable device serial and serial port are required");
  const probe=await probeEsp32({port,version,root}),installed=await verifyEspIdf(version,{root});
  let info;
- try{info=await esptool(installed.idfPath,["--port",port,"flash-id"],45000);}
- catch{info=await esptool(installed.idfPath,["--port",port,"flash_id"],45000);}
+ try{info=await esptool(installed.activationScript,["--port",port,"flash-id"],45000);}
+ catch{info=await esptool(installed.activationScript,["--port",port,"flash_id"],45000);}
  const sizeMatch=info.output.match(/Detected flash size:\s*(\d+)\s*(KB|MB)/i);
  if(!sizeMatch)throw new Error("Could not determine flash size; refusing an unbounded flash readback");
  const flashBytes=Number(sizeMatch[1])*(sizeMatch[2].toUpperCase()==="MB"?1024*1024:1024);
  if(!Number.isSafeInteger(flashBytes)||flashBytes<1024*1024||flashBytes>64*1024*1024)throw new Error("Detected flash size is outside safe backup bounds");
  let security;
- try{security=await esptool(installed.idfPath,["--port",port,"get-security-info"],45000);}
- catch{try{security=await esptool(installed.idfPath,["--port",port,"get_security_info"],45000);}catch{throw new Error("ESP32 security state could not be verified; firmware readback backup is disabled");}}
+ try{security=await esptool(installed.activationScript,["--port",port,"get-security-info"],45000);}
+ catch{try{security=await esptool(installed.activationScript,["--port",port,"get_security_info"],45000);}catch{throw new Error("ESP32 security state could not be verified; firmware readback backup is disabled");}}
  if(!/Secure Boot:\s*Disabled/i.test(security.output)||!/Flash Encryption:\s*Disabled/i.test(security.output))
   throw new Error("ESP32 secure boot or flash encryption is enabled/unknown; raw firmware backup is not safely restorable");
- try{await esptool(installed.idfPath,["--port",port,"read-flash","0x0",String(flashBytes),outputPath],180000);}
- catch(first){try{await esptool(installed.idfPath,["--port",port,"read_flash","0x0",String(flashBytes),outputPath],180000);}catch{throw first;}}
+ try{await esptool(installed.activationScript,["--port",port,"read-flash","0x0",String(flashBytes),outputPath],180000);}
+ catch(first){try{await esptool(installed.activationScript,["--port",port,"read_flash","0x0",String(flashBytes),outputPath],180000);}catch{throw first;}}
  const image=readFileSync(outputPath),manifest={schema:1,artifactType:"esp32-firmware-backup",
   chip:probe.chip,deviceSerial,flashBytes,sha256:hash(image),size:image.length,
   securityProbe:"completed",createdAt:new Date().toISOString()};
@@ -368,14 +368,14 @@ export async function restoreEsp32Firmware({port,version="6.1.1",imagePath,manif
  if(normChip(probe.chip)!==normChip(manifest.chip))throw new Error("Backup chip identity does not match connected device");
  const installed=await verifyEspIdf(version,{root});
  let info;
- try{info=await esptool(installed.idfPath,["--port",port,"flash-id"],45000);}
- catch{info=await esptool(installed.idfPath,["--port",port,"flash_id"],45000);}
+ try{info=await esptool(installed.activationScript,["--port",port,"flash-id"],45000);}
+ catch{info=await esptool(installed.activationScript,["--port",port,"flash_id"],45000);}
  const sizeMatch=info.output.match(/Detected flash size:\s*(\d+)\s*(KB|MB)/i);
  if(!sizeMatch)throw new Error("Could not verify target flash size");
  const size=Number(sizeMatch[1])*(sizeMatch[2].toUpperCase()==="MB"?1024*1024:1024);
  if(size!==manifest.flashBytes)throw new Error("Backup flash size does not match connected device");
- try{return await esptool(installed.idfPath,["--port",port,"write-flash","0x0",imagePath],180000);}
- catch(first){try{return await esptool(installed.idfPath,["--port",port,"write_flash","0x0",imagePath],180000);}catch{throw first;}}
+ try{return await esptool(installed.activationScript,["--port",port,"write-flash","0x0",imagePath],180000);}
+ catch(first){try{return await esptool(installed.activationScript,["--port",port,"write_flash","0x0",imagePath],180000);}catch{throw first;}}
 }
 export async function deployAndroidApk({adbPath,serial,apkPath,manifest,deviceProfile="avalue-epd-42s"}={}){
  if(typeof adbPath!=="string"||!existsSync(adbPath)||typeof serial!=="string"||!serial||!existsSync(apkPath))throw new Error("ADB, authorized device serial and APK are required");
