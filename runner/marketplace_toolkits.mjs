@@ -107,7 +107,7 @@ export function validateFlasherArgs(value,root){
  const files=[];
  for(const [address,name] of Object.entries(value.flash_files)){
   if(!/^0x[0-9a-fA-F]{1,8}$/.test(address)||typeof name!=="string"||
-   name.startsWith("/")||name.includes("\\\\")||name.split("/").includes(".."))
+   name.startsWith("/")||name.includes("\\")||name.split("/").includes(".."))
    throw new Error("Unsafe firmware flash entry");
   const file=resolve(root,name);if(!file.startsWith(resolve(root)+sep))throw new Error("Firmware file escaped bundle root");
   files.push({address:Number.parseInt(address,16),file});
