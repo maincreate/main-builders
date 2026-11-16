@@ -158,7 +158,7 @@ export async function installAndroidSdk({os=osName(),architecture=archName(),roo
  const major=Number(javaVersion.match(/version ["']?(\\d+)/i)?.[1]||javaVersion.match(/openjdk (\\d+)/i)?.[1]||0);
  if(major<17)throw new Error("A system JDK 17 or newer is required before Android SDK installation");
  const archive=await downloadFn(recipe.url);const digest=verifyDigest(archive,recipe.sha256);
- const parent=androidRoot(root);await fs.mkdir(dirname(parent),{recursive:true,mode:0o700});
+ const parent=androidRoot(root);\n if(existsSync(parent)){const existing=await inspectInstalledToolkit({family:"android-sdk",version:ANDROID_RELEASE.version,root});if(existing.installed)return {...existing,status:"already-installed"};}\n await fs.mkdir(dirname(parent),{recursive:true,mode:0o700});
  const stage=await fs.mkdtemp(join(dirname(parent),".stage-android-"));
  try{
   const extracted=join(stage,"extracted");await extractZip(archive,extracted,{maxEntries:20000,maxExpanded:2*1024*1024*1024});
@@ -194,10 +194,14 @@ export async function inspectInstalledToolkit({family,version,root=sdkRoot()}={}
   return {installed:output.includes(version),version,executable:"idf.py",path:p,exportScript};
  }
  if(family==="android-sdk"){
-  const p=join(androidRoot(root),"sdk");
-  if(!existsSync(join(p,"platform-tools","adb"))||!existsSync(join(p,"build-tools","36.0.0","aapt2")))return {installed:false};
+  const p=join(androidRoot(root),"sdk"),metadataPath=join(p,".maincreate-install.json");
+  if(!existsSync(metadataPath)||!existsSync(join(p,"platform-tools","adb"))||!existsSync(join(p,"build-tools","36.0.0","aapt2")))return {installed:false};
+  const metadata=JSON.parse(await fs.readFile(metadataPath,"utf8"));
+  if(metadata.version!==ANDROID_RELEASE.version||metadata.commandLineTools!==ANDROID_RELEASE.commandLineTools||
+   metadata.jdkMajor<17||!Array.isArray(metadata.packages)||!metadata.packages.includes("platforms;android-22")||
+   !metadata.packages.includes("platforms;android-37")||!/^[a-f0-9]{64}$/.test(metadata.sha256||""))return {installed:false};
   const output=await run(join(p,"platform-tools","adb"),["version"],{timeout:30000});
-  return {installed:true,version:ANDROID_RELEASE.version,adb:output.split("\n")[0],path:p};
+  return {installed:true,version:ANDROID_RELEASE.version,adb:output.split("\n")[0],path:p,sdkRoot:p,jdkMajor:metadata.jdkMajor};
  }
  throw new Error("Unknown toolkit family");
 }
