@@ -514,14 +514,16 @@ restore_android_app(){
   adb="$(adb_path)" || die "ADB is not installed"
   probe_android "$serial" >/dev/null
   read -r package expected count < <(python3 - "$backup_dir/backup-manifest.json" "$backup_dir" <<'PY'
-import hashlib,json,os,sys
+import hashlib,json,os,re,sys
 manifest,directory=sys.argv[1:]
 m=json.load(open(manifest,encoding="utf-8"))
 if m.get("artifactType")!="android-installed-application-backup": raise SystemExit("Invalid Android application backup manifest")
 files=m.get("apkFiles")
 if not isinstance(files,list) or not files: raise SystemExit("Backup manifest has no APK components")
 for item in files:
- path=os.path.join(directory,item.get("file",""))
+ filename=item.get("file","")
+ if not isinstance(filename,str) or not re.fullmatch(r"app-[0-9]+\\.apk",filename): raise SystemExit("Invalid APK component filename")
+ path=os.path.join(directory,filename)
  if not os.path.isfile(path) or hashlib.sha256(open(path,"rb").read()).hexdigest()!=item.get("sha256"):
   raise SystemExit("APK backup checksum mismatch")
 print(m.get("packageName",""),m.get("sourceDeviceSerial",""),len(files))
@@ -529,9 +531,11 @@ PY
 )
   [[ -n "$package" && "$expected" == "$serial" ]] || die "Android backup belongs to a different device serial"
   mapfile -t apk_files < <(python3 - "$backup_dir/backup-manifest.json" "$backup_dir" <<'PY'
-import json,os,sys
+import json,os,re,sys
 m=json.load(open(sys.argv[1],encoding="utf-8"))
-for item in m["apkFiles"]: print(os.path.join(sys.argv[2],item["file"]))
+for item in m["apkFiles"]:
+ if not isinstance(item.get("file"),str) or not re.fullmatch(r"app-[0-9]+\\.apk",item["file"]): raise SystemExit("Invalid APK component filename")
+ print(os.path.join(sys.argv[2],item["file"]))
 PY
 )
   (( \${#apk_files[@]} > 0 )) || die "No APK files were found in the backup"
