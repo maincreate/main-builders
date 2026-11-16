@@ -289,9 +289,9 @@ async function executeJob(config,job){
     const wrapperProperties=join(checkout,"gradle","wrapper","gradle-wrapper.properties");
     if(!statSync(wrapperProperties).isFile())throw new Error("Pinned Gradle wrapper properties are missing");
     const wrapperConfig=readFileSync(wrapperProperties,"utf8");
-    const distribution=wrapperConfig.match(/^distributionUrl\\s*=\\s*(.+)$/m)?.[1]?.trim();
+    const distribution=wrapperConfig.match(/^distributionUrl\\s*=\\s*(.+)$/m)?.[1]?.trim().replaceAll("\\\\:",":");
     const checksum=wrapperConfig.match(/^distributionSha256Sum\\s*=\\s*([a-fA-F0-9]{64})$/m)?.[1];
-    if(!distribution||!distribution.startsWith("https\\://services.gradle.org/distributions/gradle-")||!checksum)
+    if(!/^https:\\/\\/services\\.gradle\\.org\\/distributions\\/gradle-9\\.6\\.0-(bin|all)\\.zip$/.test(distribution||"")||!checksum)
      throw new Error("Gradle wrapper must use an HTTPS official Gradle distribution with a pinned SHA-256");
     const gradle=join(checkout,"gradlew");
     if(!statSync(gradle).isFile())throw new Error("Project Gradle wrapper is missing");
