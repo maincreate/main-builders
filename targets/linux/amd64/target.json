@@ -1,5 +1,5 @@
 {
   "os": "linux",
   "arch": "amd64",
-  "status": "planned"
+  "status": "supported"
 }
