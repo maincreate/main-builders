@@ -1,0 +1,46 @@
+name: Linux ARM64 and x64 host parity
+
+on:
+  push:
+    branches: [main, 'feature/**']
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    # Never run untrusted fork code on the private Main{Create} CI host.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, ci, linux-x64]
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: host/go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Host and runner tests
+        run: |
+          (cd host && go test ./...)
+          node --test runner/service.test.mjs runner/sdk_install.test.mjs
+          bash -n scripts/install-linux.sh scripts/uninstall-linux.sh
+      - name: Wrong-architecture selection fails before package changes
+        run: |
+          if MAIN_CONTROLLER_URL=https://example.com MAIN_EXPECTED_ARCH=arm64 bash scripts/install-linux.sh >/tmp/wrong-arch.log 2>&1; then
+            echo 'ARM64 installer selection should fail on Linux x64' >&2
+            exit 1
+          fi
+          grep -q 'Wrong architecture:' /tmp/wrong-arch.log
+      - name: Build Linux x64 and ARM64 hosts
+        run: |
+          (cd host && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o /tmp/maincreate-host-linux-amd64 .)
+          (cd host && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o /tmp/maincreate-host-linux-arm64 .)
+          test "$(cat targets/linux/amd64/VERSION)" = "$(/tmp/maincreate-host-linux-amd64 version)"
+          test "$(cat targets/linux/arm64/VERSION)" = "$(cat targets/linux/amd64/VERSION)"
+          test -s /tmp/maincreate-host-linux-amd64
+          test -s /tmp/maincreate-host-linux-arm64
+          sha256sum /tmp/maincreate-host-linux-amd64 /tmp/maincreate-host-linux-arm64
