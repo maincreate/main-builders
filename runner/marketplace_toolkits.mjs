@@ -90,6 +90,39 @@ async function atomicReplace(stage,target){
 function osName(){return ({linux:"linux",darwin:"macos",win32:"windows"})[platform()];}
 function archName(){return ({x64:"x64",arm64:"arm64"})[arch()];}
 
+
+export function validateFirmwareManifest(value,{version,chip}={}){
+ if(!value||typeof value!=="object"||value.kind!=="maincreate-esp-idf-firmware-bundle"||
+  !["5.5.6","6.1.1"].includes(value.toolkitVersion)||value.toolkitVersion!==version||
+  typeof value.targetChip!=="string"||value.targetChip.toLowerCase()!==String(chip||"").toLowerCase()||
+  !/^[a-f0-9]{40}$/i.test(value.sourceRevision||"")||
+  !/^[a-f0-9]{64}$/.test(value.bundleSha256||""))
+  throw new Error("Firmware bundle manifest does not match the approved toolkit, target chip, revision or checksum");
+ return value;
+}
+export function validateFlasherArgs(value,root){
+ if(!value||typeof value!=="object"||!value.flash_files||typeof value.flash_files!=="object"||
+  Array.isArray(value.flash_files)||Object.keys(value.flash_files).length<1||Object.keys(value.flash_files).length>32)
+  throw new Error("Invalid ESP-IDF flasher_args.json");
+ const files=[];
+ for(const [address,name] of Object.entries(value.flash_files)){
+  if(!/^0x[0-9a-fA-F]{1,8}$/.test(address)||typeof name!=="string"||
+   name.startsWith("/")||name.includes("\\\\")||name.split("/").includes(".."))
+   throw new Error("Unsafe firmware flash entry");
+  const file=resolve(root,name);if(!file.startsWith(resolve(root)+sep))throw new Error("Firmware file escaped bundle root");
+  files.push({address:Number.parseInt(address,16),file});
+ }
+ const flags=Array.isArray(value.write_flash_args)?value.write_flash_args:[];
+ const allowed=new Set(["--flash-mode","--flash-freq","--flash-size","--compress","--no-compress","--erase-all","--force"]);
+ for(let i=0;i<flags.length;i++){
+  if(!allowed.has(flags[i]))throw new Error("Unsupported ESP-IDF flash option");
+  if(flags[i].startsWith("--")&&!["--compress","--no-compress","--erase-all","--force"].includes(flags[i])){
+   const v=flags[++i];if(typeof v!=="string"||!/^([A-Za-z0-9]+)$/.test(v))throw new Error("Invalid ESP-IDF flash option value");
+  }
+ }
+ return {files,writeFlashArgs:flags};
+}
+
 export async function installEspIdf({version,os=osName(),architecture=archName(),root=sdkRoot(),downloadFn=download,runner=run}={}){
  const release=ESP_IDF_RELEASES[version];if(!release)throw new Error("ESP-IDF version is not in the approved marketplace catalog");
  const recipe=release.targets[hostKey(os,architecture)];if(!recipe)throw new Error("ESP-IDF is not supported on this builder OS/architecture");
