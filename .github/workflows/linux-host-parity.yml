@@ -13,7 +13,7 @@ jobs:
   validate:
     # Never run untrusted fork code on the private Main{Create} CI host.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, ci, linux-x64]
+    runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
