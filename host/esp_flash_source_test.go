@@ -6,6 +6,10 @@ import (
  "encoding/json"
  "testing"
  "strings"
+ "bytes"
+ "net/http"
+ "net/http/httptest"
+ "encoding/base64"
 )
 
 func TestFlashBundleRejectsUnreviewedOrModifiedFirmware(t *testing.T){
@@ -28,4 +32,38 @@ func TestFlashBundleRejectsUnreviewedOrModifiedFirmware(t *testing.T){
  manifest.Files[0].Name="../bootloader.bin"
  encoded,_=json.Marshal(manifest)
  if err:=verifyFlashSourceBundle(sourceID,encoded,images);err==nil{t.Fatal("unknown source name accepted")}
+}
+
+func TestFlashSourceTransportChecksSHAAndBoundaries(t *testing.T){
+ payload:=bytes.Repeat([]byte("reviewed-firmware"),4500)
+ hash:=sha256.Sum256(payload)
+ const job="0123456789abcdef0123456789abcdef"
+ const source="fedcba9876543210fedcba9876543210"
+ tamper:=false
+ server:=httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){
+  var req map[string]any
+  if e:=json.NewDecoder(r.Body).Decode(&req);e!=nil{t.Error(e);w.WriteHeader(400);return}
+  if req["action"]!="source_get"||req["source_job_id"]!=source||req["job_id"]!=job||req["name"]!="esp32s3-firmware.bin"{
+   t.Errorf("unexpected firmware source request: %v",req)
+  }
+  offset:=int(req["offset"].(float64))
+  end:=offset+48*1024
+  if end>len(payload){end=len(payload)}
+  chunk:=payload[offset:end]
+  if tamper&&offset==0{chunk=bytes.Clone(chunk);chunk[0]^=1}
+  _=json.NewEncoder(w).Encode(map[string]any{
+   "asset":map[string]any{"name":"esp32s3-firmware.bin","size":len(payload),"sha256":hex.EncodeToString(hash[:])},
+   "offset":offset,"content_base64":base64.StdEncoding.EncodeToString(chunk),
+   "next_offset":end,"complete":end==len(payload),
+  })
+ }))
+ defer server.Close()
+ c:=config{Controller:server.URL,Token:"test-token",ID:"test-host"}
+ result,e:=fetchFlashSourceAsset(c,job,source,"esp32s3-firmware.bin")
+ if e!=nil{t.Fatal(e)}
+ if !bytes.Equal(result,payload){t.Fatal("firmware source changed in transport")}
+ tamper=true
+ if _,e=fetchFlashSourceAsset(c,job,source,"esp32s3-firmware.bin");e==nil{t.Fatal("accepted tampered firmware")}
+ if _,e=fetchFlashSourceAsset(c,job,source,"../secret");e==nil{t.Fatal("accepted arbitrary firmware source name")}
+ if _,e=fetchFlashSourceAsset(c,"invalid",source,"esp32s3-firmware.bin");e==nil{t.Fatal("accepted invalid job ID")}
 }
