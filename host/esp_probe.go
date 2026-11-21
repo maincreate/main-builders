@@ -89,8 +89,8 @@ func probeESP32ReadOnly(port,esptoolPath string)(esp32Probe,error){
   if len(output)>16*1024{return "",errors.New("ESP32 probe output exceeds limit")}
   return string(output),nil
  }
- chip,err:=run("chip-id");if err!=nil{return esp32Probe{},err}
- mac,err:=run("read-mac");if err!=nil{return esp32Probe{},err}
- flash,err:=run("flash-id");if err!=nil{return esp32Probe{},err}
+ chip,err:=run("chip_id");if err!=nil{return esp32Probe{},err}
+ mac,err:=run("read_mac");if err!=nil{return esp32Probe{},err}
+ flash,err:=run("flash_id");if err!=nil{return esp32Probe{},err}
  return parseESP32ProbeThree(port,chip,mac,flash)
 }
