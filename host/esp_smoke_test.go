@@ -10,7 +10,6 @@ import (
  "net/http/httptest"
  "os"
  "path/filepath"
- "strings"
  "testing"
 )
 
@@ -79,6 +78,4 @@ func TestFabricBinaryArtifactUploadHasVerifiedDigestAndChunks(t *testing.T){
  if err:=uploadFabricAsset(c,jobID,"test.bin","application/octet-stream",nil);err==nil{
   t.Fatal("empty firmware artifact accepted")
  }
- if _,e:=os.Stat(filepath.Join(t.TempDir(),"unknown.bin"));e==nil{t.Fatal("unexpected file")}
- _=strings.Contains
 }
