@@ -1,10 +1,15 @@
-import {readFileSync,writeFileSync,mkdirSync,chmodSync,statSync,realpathSync,readdirSync} from "node:fs";
-import {join,resolve,isAbsolute,sep,dirname} from "node:path";
-import {homedir,hostname,platform,arch,cpus,totalmem,freemem,uptime} from "node:os";
+import {readFileSync,writeFileSync,mkdirSync,chmodSync,statSync,realpathSync,readdirSync,mkdtempSync,rmSync} from "node:fs";
+import {join,resolve,isAbsolute,sep,dirname,basename} from "node:path";
+import {homedir,hostname,platform,arch,cpus,totalmem,freemem,uptime,tmpdir} from "node:os";
 import {createHash} from "node:crypto";
 import {spawn} from "node:child_process";
 import {fileURLToPath} from "node:url";
 import {installArduinoCli,installedArduinoCli,isExactArduinoVersion} from "./sdk_install.mjs";
+import {
+ installEspIdf,verifyEspIdf,installAndroidSdk,verifyAndroidSdk,installAndroidAdb,verifyAndroidAdb,
+ buildEspIdfProject,buildAndroidApp,flashEsp32,backupEsp32Firmware,restoreEsp32Firmware,
+ deployAndroidApk,backupAndroidApk,restoreAndroidApk,removeToolkit
+} from "./toolkit_runtime.mjs";
 
 const configDir=process.env.MAIN_RUNNER_STATE_DIR||join(homedir(),".maincreate");
 const path=join(configDir,"runner.json");
@@ -70,7 +75,7 @@ async function processTool(bin,args,cwd,timeoutMs){
 }
 async function uploadAsset(config,jobId,name,mime,data){
  if(!Buffer.isBuffer(data))data=Buffer.from(data);
- if(data.length<1||data.length>8*1024*1024)throw new Error("Artifact outside allowed size");
+ if(data.length<1||data.length>64*1024*1024)throw new Error("Artifact outside allowed size");
  const base={id:config.id,job_id:jobId};
  const begin=await post("/api/agent/assets",{...base,action:"begin",name,mime,size:data.length},config.token);
  const id=begin.asset.id,chunkSize=Math.min(48*1024,begin.max_chunk_bytes||48*1024);
@@ -96,6 +101,56 @@ function gatherFirmware(dir){
  }catch(e){if(e.code!=="ENOENT")throw e;}
  return items;
 }
+
+async function downloadJobArtifacts(config,job,destination){
+ const sourceJobId=job.parameters?.source_job_id;
+ if(typeof sourceJobId!=="string"||!/^[a-f0-9]{32}$/.test(sourceJobId))
+  throw new Error("A completed source job is required for artifact handoff");
+ const base={id:config.id,job_id:job.id,source_job_id:sourceJobId};
+ const listed=await post("/api/agent/assets",{...base,action:"list"},config.token);
+ if(!Array.isArray(listed.assets)||!listed.assets.length)throw new Error("Source job has no completed artifacts");
+ mkdirSync(destination,{recursive:true,mode:0o700});
+ const result=[];
+ for(const asset of listed.assets){
+  if(!/^(?:maincreate-|base\.apk$|split-\d+\.apk$)/.test(asset.name)&&!/\.apk$/i.test(asset.name))continue;
+  if(!Number.isSafeInteger(asset.size)||asset.size<1||asset.size>64*1024*1024)throw new Error("Source artifact exceeds allowed size");
+  const chunks=[];let offset=0;
+  while(offset<asset.size){
+   const part=await post("/api/agent/assets",{...base,action:"get",asset_id:asset.id,offset,length:48*1024},config.token);
+   const bytes=Buffer.from(part.content_base64||"","base64");
+   if(!bytes.length||part.offset!==offset||part.asset?.id!==asset.id)throw new Error("Artifact download offset or identity mismatch");
+   chunks.push(bytes);offset+=bytes.length;
+   if(offset>asset.size)throw new Error("Artifact download exceeded declared size");
+  }
+  const data=Buffer.concat(chunks,offset);
+  if(data.length!==asset.size||createHash("sha256").update(data).digest("hex")!==asset.sha256)
+   throw new Error("Source artifact checksum mismatch: "+asset.name);
+  const target=join(destination,basename(asset.name));
+  writeFileSync(target,data,{mode:0o600,flag:"wx"});
+  result.push({id:asset.id,name:asset.name,path:target,mime:asset.mime,sha256:asset.sha256,size:asset.size});
+ }
+ if(!result.length)throw new Error("No eligible firmware or Android artifacts were found in the source job");
+ return result;
+}
+async function verifiedCheckout(job){
+ const repo=job.parameters?.repository;
+ if(typeof repo!=="string")throw new Error("Repository missing");
+ const checkout=approvedCheckout(repo);
+ if(typeof job.parameters?.revision!=="string"||!/^[a-f0-9]{40}$/i.test(job.parameters.revision))
+  throw new Error("An exact Git revision must be approved before building");
+ const actual=(await processTool("git",["rev-parse","HEAD"],checkout,20000)).trim();
+ if(actual.toLowerCase()!==job.parameters.revision.toLowerCase())
+  throw new Error("Checkout revision differs from approved plan; update the checkout separately");
+ const dirty=(await processTool("git",["status","--porcelain=v1","--untracked-files=normal"],checkout,20000)).trim();
+ if(dirty)throw new Error("Approved checkout has modified or untracked files; use a clean pinned checkout");
+ return checkout;
+}
+async function localAdbPath(){
+ try{return (await verifyAndroidSdk()).adb;}catch{}
+ try{return (await verifyAndroidAdb()).adbPath;}catch{}
+ throw new Error("Android ADB toolkit is not installed and verified on this builder");
+}
+
 async function executeJob(config,job){
  const results=[],out=[],ids=[],steps=job.steps||[];
  let failed=false;
@@ -109,25 +164,104 @@ async function executeJob(config,job){
     out.push("Host snapshot recorded");
     ids.push(await uploadAsset(config,job.id,"host-snapshot.json","application/json",
      Buffer.from(JSON.stringify(report,null,2))));
+
+   }else if(step.capability==="sdk.esp_idf.install"){
+    const installed=await installEspIdf({version:job.parameters?.toolkit_version,os,architecture});
+    out.push("ESP-IDF "+installed.version+" installed and verified on "+os+"/"+architecture);
+   }else if(step.capability==="sdk.android.install"){
+    const installed=await installAndroidSdk({version:job.parameters?.toolkit_version,os,architecture});
+    out.push("Android SDK "+installed.version+" installed and verified on "+os+"/"+architecture);
+   }else if(step.capability==="sdk.android_adb.install"){
+    const installed=await installAndroidAdb({os,architecture});
+    out.push("Android ADB device adapter "+installed.version+" installed and verified");
+   }else if(step.capability==="sdk.toolkit.cleanup"){
+    const result=removeToolkit({family:job.parameters?.toolkit_id,version:job.parameters?.toolkit_version,dryRun:false});
+    out.push("Removed toolkit "+result.family+" "+result.version+": "+result.paths.join(", "));
    }else if(step.capability==="firmware.esp_idf.build"){
-    const repo=job.parameters?.repository;
-    if(typeof repo!=="string")throw new Error("Repository missing");
-    const checkout=approvedCheckout(repo);
-    if(typeof job.parameters?.revision!=="string"||!/^[a-f0-9]{40}$/i.test(job.parameters.revision))
-     throw new Error("An exact Git revision must be approved before building");
-    const actual=(await processTool("git",["rev-parse","HEAD"],checkout,20000)).trim();
-    if(actual.toLowerCase()!==job.parameters.revision.toLowerCase())
-     throw new Error("Checkout revision differs from approved plan; update the checkout separately");
-    const dirty=(await processTool("git",["status","--porcelain=v1","--untracked-files=normal"],checkout,20000)).trim();
-    if(dirty)throw new Error("Approved checkout has modified or untracked files; use a clean pinned checkout");
-    // No user-provided executable, flags, environment, working directory, URL or command string.
-    const output=await processTool(process.env.MAIN_RUNNER_IDF_CMD||"idf.py",["-C",checkout,"build"],
-     checkout,20*60*1000);
-    out.push(output.slice(-14000));
-    ids.push(await uploadAsset(config,job.id,"esp-idf-build-log.txt","text/plain",
-     Buffer.from(output||"Build completed")));
-    for(const artifact of gatherFirmware(checkout))
-     ids.push(await uploadAsset(config,job.id,artifact.name,"application/octet-stream",artifact.data));
+    const checkout=await verifiedCheckout(job),version=job.parameters?.toolkit_version;
+    const built=await buildEspIdfProject({projectDir:checkout,version});
+    built.manifest.sourceRevision=job.parameters.revision;
+    writeFileSync(built.manifestPath,JSON.stringify(built.manifest,null,2)+"\n",{mode:0o600});
+    ids.push(await uploadAsset(config,job.id,"maincreate-firmware.bin","application/octet-stream",readFileSync(built.imagePath)));
+    ids.push(await uploadAsset(config,job.id,"maincreate-firmware-manifest.json","application/json",readFileSync(built.manifestPath)));
+    out.push(built.log);
+   }else if(step.capability==="android.app.build"){
+    const checkout=await verifiedCheckout(job);
+    const built=await buildAndroidApp({projectDir:checkout,version:job.parameters?.toolkit_version,targetProfile:job.parameters?.target_profile});
+    built.manifest.sourceRevision=job.parameters.revision;
+    writeFileSync(built.manifestPath,JSON.stringify(built.manifest,null,2)+"\n",{mode:0o600});
+    for(const apk of built.apks)ids.push(await uploadAsset(config,job.id,apk.name,"application/vnd.android.package-archive",readFileSync(apk.path)));
+    ids.push(await uploadAsset(config,job.id,"maincreate-android-manifest.json","application/json",readFileSync(built.manifestPath)));
+    out.push(built.log+"; uploaded "+built.apks.length+" APK(s)");
+   }else if(step.capability==="firmware.esp_idf.flash"){
+    const temp=mkdtempSync(join(tmpdir(),"maincreate-flash-"));
+    try{
+     const assets=await downloadJobArtifacts(config,job,temp);
+     const image=assets.find(a=>a.name==="maincreate-firmware.bin"),manifestAsset=assets.find(a=>a.name==="maincreate-firmware-manifest.json");
+     if(!image||!manifestAsset)throw new Error("Source build is missing the merged firmware image or manifest");
+     const manifest=JSON.parse(readFileSync(manifestAsset.path,"utf8"));
+     const result=await flashEsp32({port:job.parameters?.device_port,version:job.parameters?.toolkit_version,
+      imagePath:image.path,manifest,deviceSerial:job.parameters?.device_serial});
+     out.push(result.output);
+    }finally{rmSync(temp,{recursive:true,force:true});}
+   }else if(step.capability==="firmware.esp_idf.backup"){
+    const temp=mkdtempSync(join(tmpdir(),"maincreate-esp-backup-"));
+    try{
+     const backup=await backupEsp32Firmware({port:job.parameters?.device_port,version:job.parameters?.toolkit_version,
+      outputPath:join(temp,"maincreate-esp32-backup.bin"),deviceSerial:job.parameters?.device_serial});
+     ids.push(await uploadAsset(config,job.id,"maincreate-esp32-backup.bin","application/octet-stream",readFileSync(backup.imagePath)));
+     ids.push(await uploadAsset(config,job.id,"maincreate-esp32-backup.json","application/json",readFileSync(backup.manifestPath)));
+     out.push("Firmware image backed up: "+backup.manifest.flashBytes+" bytes; SHA-256 "+backup.manifest.sha256);
+    }finally{rmSync(temp,{recursive:true,force:true});}
+   }else if(step.capability==="firmware.esp_idf.restore"){
+    const temp=mkdtempSync(join(tmpdir(),"maincreate-esp-restore-"));
+    try{
+     const assets=await downloadJobArtifacts(config,job,temp);
+     const image=assets.find(a=>a.name==="maincreate-esp32-backup.bin"),meta=assets.find(a=>a.name==="maincreate-esp32-backup.json");
+     if(!image||!meta)throw new Error("Source backup job is missing firmware image or manifest");
+     const manifest=JSON.parse(readFileSync(meta.path,"utf8"));
+     const result=await restoreEsp32Firmware({port:job.parameters?.device_port,version:job.parameters?.toolkit_version,
+      imagePath:image.path,manifest,deviceSerial:job.parameters?.device_serial});
+     out.push(result.output);
+    }finally{rmSync(temp,{recursive:true,force:true});}
+   }else if(step.capability==="android.app.deploy"){
+    const temp=mkdtempSync(join(tmpdir(),"maincreate-android-deploy-"));
+    try{
+     const assets=await downloadJobArtifacts(config,job,temp);
+     const meta=assets.find(a=>a.name==="maincreate-android-manifest.json");
+     if(!meta)throw new Error("Source Android build is missing its manifest");
+     const manifest=JSON.parse(readFileSync(meta.path,"utf8"));
+     const candidates=assets.filter(a=>a.mime==="application/vnd.android.package-archive");
+     const entry=job.parameters?.package_name?manifest.outputs.find(x=>x.packageName===job.parameters.package_name):manifest.outputs.length===1?manifest.outputs[0]:null;
+     if(!entry)throw new Error("Select an application package when the build produced multiple APKs");
+     const apk=candidates.find(a=>a.name===entry.name);
+     if(!apk)throw new Error("Selected Android APK is missing from the artifact handoff");
+     if(job.parameters?.package_name&&entry.packageName!==job.parameters.package_name)throw new Error("APK package does not match selected application");
+     const result=await deployAndroidApk({adbPath:await localAdbPath(),serial:job.parameters?.device_serial,
+      apkPath:apk.path,manifest,deviceProfile:job.parameters?.device_profile||"avalue-epd-42s"});
+     out.push(result.output);
+    }finally{rmSync(temp,{recursive:true,force:true});}
+   }else if(step.capability==="android.app.backup"){
+    const temp=mkdtempSync(join(tmpdir(),"maincreate-android-backup-"));
+    try{
+     const backup=await backupAndroidApk({adbPath:await localAdbPath(),serial:job.parameters?.device_serial,
+      packageName:job.parameters?.package_name,outputDir:temp});
+     for(const item of backup.outputs)ids.push(await uploadAsset(config,job.id,item.name,"application/vnd.android.package-archive",readFileSync(item.path)));
+     ids.push(await uploadAsset(config,job.id,"maincreate-android-app-backup.json","application/json",readFileSync(backup.manifestPath)));
+     out.push("Backed up "+backup.outputs.length+" APK package artifact(s) for "+job.parameters.package_name);
+    }finally{rmSync(temp,{recursive:true,force:true});}
+   }else if(step.capability==="android.app.restore"){
+    const temp=mkdtempSync(join(tmpdir(),"maincreate-android-restore-"));
+    try{
+     const assets=await downloadJobArtifacts(config,job,temp);
+     const meta=assets.find(a=>a.name==="maincreate-android-app-backup.json");
+     if(!meta)throw new Error("Source Android backup is missing its manifest");
+     const manifest=JSON.parse(readFileSync(meta.path,"utf8"));
+     const apks=assets.filter(a=>a.mime==="application/vnd.android.package-archive").map(a=>a.path);
+     const result=await restoreAndroidApk({adbPath:await localAdbPath(),serial:job.parameters?.device_serial,
+      apkPaths:apks,manifest,packageName:job.parameters?.package_name});
+     out.push(result.output);
+    }finally{rmSync(temp,{recursive:true,force:true});}
    }else if(step.capability==="sdk.arduino_cli.install"){
     if(process.env.MAIN_RUNNER_ENABLE_SDK_INSTALLS!=="1")throw new Error("SDK installation adapter disabled by operator opt-in");
     const installed=await installArduinoCli({os,architecture:architecture});
@@ -196,7 +330,7 @@ async function scanSerialDevices(){
 async function detectPackages(){
  const candidates=[["node","node",["--version"]],["git","git",["--version"]],
   ["python3","python3",["--version"]],["cmake","cmake",["--version"]],
-  ["gcc","gcc",["--version"]],["esp-idf","idf.py",["--version"]],
+  ["gcc","gcc",["--version"]],["esp-idf","idf.py",["--version"]],["adb","adb",["version"]],["eim","eim",["--version"]],
   ["swift","swift",["--version"]],["xcode","xcodebuild",["-version"]]];
  const packages=[];
  for(const [name,bin,args] of candidates){
@@ -218,10 +352,42 @@ async function detectPackages(){
  }catch{}
  return packages;
 }
+
+async function detectToolkits(){
+ const found=[];
+ for(const version of ["5.5.6","6.1.1"]){
+  try{const item=await verifyEspIdf(version);found.push({id:"esp-idf",version,verified:true,observedVersion:item.versionOutput});}catch{}
+ }
+ try{const item=await verifyAndroidSdk();found.push({id:"android-sdk",version:item.version,verified:true});}catch{}
+ try{const item=await verifyAndroidAdb();found.push({id:"android-adb",version:"system",verified:true,source:item.source||"managed"});}catch{}
+ return found;
+}
+async function detectAndroidDevices(){
+ let adb=null;
+ try{adb=(await verifyAndroidSdk()).adb;}catch{}
+ if(!adb)try{adb=(await verifyAndroidAdb()).adbPath;}catch{}
+ if(!adb)return [];
+ const listing=await processTool(adb,["devices","-l"],undefined,12000).catch(()=> "");
+ const rows=String(listing).split(/\r?\n/).slice(1),devices=[];
+ for(const line of rows){
+  const match=line.trim().match(/^([^\s]+)\s+device\b(.*)$/);
+  if(!match||match[1].startsWith("emulator-"))continue;
+  const serial=match[1];
+  const prop=async key=>String(await processTool(adb,["-s",serial,"shell","getprop",key],undefined,8000).catch(()=> "")).trim();
+  const [model,product,api,abi]=await Promise.all([
+   prop("ro.product.model"),prop("ro.build.product"),prop("ro.build.version.sdk"),prop("ro.product.cpu.abi")
+  ]);
+  devices.push({serial,model:model.slice(0,100),product:product.slice(0,100),
+   api:Number(api)||null,abi:abi.slice(0,60),connected:true,authorized:true});
+  if(devices.length>=8)break;
+ }
+ return devices;
+}
+
 async function run(){
  const config=JSON.parse(readFileSync(path,"utf8"));
  if(config.url!==endpoint)throw new Error("Controller URL does not match enrollment");
- console.log("Runner started: "+config.name+"; approved jobs only, no shell/flash actions");
+ console.log("Runner started: "+config.name+"; approved toolkit and device operations only");
  const heartbeat=setInterval(()=>{
   post("/api/agent/heartbeat",{id:config.id},config.token).catch(e=>console.error("Heartbeat:",e.message));
  },30000);
@@ -230,7 +396,7 @@ async function run(){
   for(;;){
    if(Date.now()>=nextPackageScan){
     nextPackageScan=Date.now()+300000;
-    try{await post("/api/agent/heartbeat",{id:config.id,packages:await detectPackages()},config.token);}
+    try{await post("/api/agent/heartbeat",{id:config.id,packages:await detectPackages(),toolkits:await detectToolkits()},config.token);}
     catch(e){console.error("Package inventory:",e.message);}
    }
    if(process.env.MAIN_RUNNER_DEVICE_DISCOVERY!=="0"&&Date.now()>=nextScan){
@@ -238,7 +404,9 @@ async function run(){
     try{
      const devices=await scanSerialDevices();
      const summary=await post("/api/agent/devices",{id:config.id,devices},config.token);
-     console.log("Device inventory: "+summary.seen+" USB serial device(s) on "+config.name);
+     const androidDevices=await detectAndroidDevices();
+     await post("/api/agent/heartbeat",{id:config.id,androidDevices},config.token);
+     console.log("Device inventory: "+summary.seen+" USB serial device(s), "+androidDevices.length+" authorized Android device(s) on "+config.name);
     }catch(e){console.error("Device inventory skipped (previous inventory preserved):",e.message);}
    }
    try{

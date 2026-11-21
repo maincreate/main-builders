@@ -108,6 +108,9 @@ install_host() {
   install -m 0755 "$TEMP/$BIN" /usr/local/bin/maincreate-host.new
   mv -f /usr/local/bin/maincreate-host.new /usr/local/bin/maincreate-host
   id -u maincreate-runner >/dev/null 2>&1 || useradd --system --create-home --home-dir /var/lib/maincreate-runner --shell /usr/sbin/nologin maincreate-runner
+  getent group plugdev >/dev/null 2>&1 || groupadd --system plugdev
+  getent group dialout >/dev/null 2>&1 || groupadd --system dialout
+  usermod -aG dialout,plugdev maincreate-runner
   install -d -m 0700 -o root -g root /var/lib/maincreate
 }
 configure_pairing() {
