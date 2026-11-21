@@ -40,18 +40,28 @@ func validateESP32Port(port string) error {
  return nil
 }
 
+func uniqueProbeValues(matches [][]string) []string {
+ var values []string
+ seen:=make(map[string]bool)
+ for _,match:=range matches{
+  if len(match)<2{continue}
+  value:=strings.ToLower(match[1])
+  if !seen[value]{seen[value]=true;values=append(values,match[1])}
+ }
+ return values
+}
 func parseESP32ProbeThree(port,chipOutput,macOutput,flashOutput string)(esp32Probe,error){
  result:=esp32Probe{Port:port,SecurityVerified:false,FlashAllowed:false}
- chips:=esp32ChipPattern.FindAllStringSubmatch(chipOutput,-1)
- macs:=esp32MACPattern.FindAllStringSubmatch(macOutput,-1)
- sizes:=esp32FlashPattern.FindAllStringSubmatch(flashOutput,-1)
+ chips:=uniqueProbeValues(esp32ChipPattern.FindAllStringSubmatch(chipOutput,-1))
+ macs:=uniqueProbeValues(esp32MACPattern.FindAllStringSubmatch(macOutput,-1))
+ sizes:=uniqueProbeValues(esp32FlashPattern.FindAllStringSubmatch(flashOutput,-1))
  if len(chips)!=1||len(macs)!=1||len(sizes)!=1 {
-  // Report only missing/ambiguous field counts, never raw serial responses.
+  // Report only missing/conflicting field counts, never raw serial responses.
   return result,fmt.Errorf("incomplete or ambiguous ESP32 identity (chip=%d mac=%d flash=%d)",len(chips),len(macs),len(sizes))
  }
- result.Chip=chips[0][1]
- result.MAC=strings.ToLower(macs[0][1])
- result.FlashSize=strings.ToUpper(sizes[0][1])
+ result.Chip=chips[0]
+ result.MAC=strings.ToLower(macs[0])
+ result.FlashSize=strings.ToUpper(sizes[0])
  return result,nil
 }
 // Legacy parser retained for existing fixtures where chip_id also includes MAC.
