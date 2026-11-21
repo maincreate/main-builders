@@ -5,15 +5,14 @@ import (
  "encoding/hex"
  "encoding/json"
  "testing"
+ "strings"
 )
 
 func TestFlashBundleRejectsUnreviewedOrModifiedFirmware(t *testing.T){
  sourceID:="0123456789abcdef0123456789abcdef"
  images:=map[string][]byte{}
  manifest:=flashSourceManifest{Schema:1,JobID:sourceID,Framework:"esp-idf",FrameworkVersion:"5.5.6",
-  Target:"esp32s3",SourceSHA256:"a"+string(make([]byte,0))}
- manifest.SourceSHA256="a" // replaced with 64-character digest below
- for len(manifest.SourceSHA256)<64{manifest.SourceSHA256+="a"}
+  Target:"esp32s3",SourceSHA256:strings.Repeat("a",64)}
  for i,name:=range flashArtifactNames{
   data:=make([]byte,1024+i*64);for j:=range data{data[j]=byte(i+j)}
   images[name]=data
