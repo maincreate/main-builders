@@ -9,6 +9,7 @@ import (
  "encoding/json"
  "errors"
  "fmt"
+ "regexp"
 )
 
 var flashArtifactNames=[]string{
@@ -16,6 +17,25 @@ var flashArtifactNames=[]string{
 }
 const flashManifestName="esp32s3-firmware-manifest.json"
 const flashSourceMaxBytes=8*1024*1024
+var sha256HexPattern=regexp.MustCompile(`^[a-f0-9]{64}package main
+
+// Firmware source is always an authenticated, immutable Main{Create} build.
+// Never fetch caller-supplied URLs, shell commands, or arbitrary asset names.
+import (
+ "crypto/sha256"
+ "encoding/base64"
+ "encoding/hex"
+ "encoding/json"
+ "errors"
+ "fmt"
+ "regexp"
+)
+
+var flashArtifactNames=[]string{
+ "esp32s3-bootloader.bin","esp32s3-partitions.bin","esp32s3-firmware.bin",
+}
+const flashManifestName="esp32s3-firmware-manifest.json"
+)
 
 type flashManifestFile struct {
  Name string `json:"name"`
